@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import queue
+import re
 import socket
 import sys
 import threading
@@ -237,9 +238,22 @@ class ClientState:
 # Persistensi sesi (untuk reconnect setelah client restart)
 # =============================================================================
 
+def _session_file_for(host: str, username: str | None = None) -> str:
+    # File sesi dulu global per machine, jadi satu client bisa menimpa
+    # reconnect target client lain. Kunci file per host + username.
+    parts = [host or "localhost"]
+    if username:
+        parts.append(username)
+    key = re.sub(r"[^A-Za-z0-9._-]+", "_", "_".join(parts)).strip("_")
+    if not key:
+        key = "default"
+    return os.path.expanduser(f"~/.kartu41_session_{key}.json")
+
 def save_session(state: ClientState):
+    # Simpan state reconnect untuk identitas pemain ini saja.
+    session_file = _session_file_for(state.host, state.username)
     try:
-        with open(SESSION_FILE, "w", encoding="utf-8") as f:
+        with open(session_file, "w", encoding="utf-8") as f:
             json.dump({
                 "player_id": state.player_id,
                 "room_code": state.room_code,
@@ -250,13 +264,24 @@ def save_session(state: ClientState):
         pass
 
 
-def load_session() -> dict | None:
-    try:
-        with open(SESSION_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else None
-    except (OSError, json.JSONDecodeError):
-        return None
+def load_session(host: str, username: str = "") -> dict | None:
+    # Prioritaskan file sesi yang cocok dengan username sekarang; fallback
+    # legacy hanya dipakai jika username belum diketahui.
+    candidates = [_session_file_for(host, username)]
+    if not username:
+        legacy = os.path.expanduser("~/.kartu41_session.json")
+        if legacy not in candidates:
+            candidates.append(legacy)
+
+    for path in candidates:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (OSError, json.JSONDecodeError):
+            continue
+    return None
 
 
 # =============================================================================
@@ -322,6 +347,12 @@ def _on_game_state(state, p, now):
     players = p.get("players")
     if isinstance(players, list) and players:
         state.players = players
+    # GAME_STATE adalah snapshot authoritative; kalau ternyata bukan giliran
+    # kita, buang aksi lama supaya UI tidak minta discard dari turn sebelumnya.
+    if state.current_turn != state.player_id:
+        state.valid_actions = []
+        if state.phase == PHASE_MUST_DISCARD:
+            state.phase = PHASE_PLAYING
     # Reconnect/late-join: kalau masih di lobby tapi sudah ada GAME_STATE,
     # game jelas sedang berjalan.
     if state.phase == PHASE_LOBBY:
@@ -423,7 +454,10 @@ def _on_reconnect_ack(state, p, now):
     # Bangun ulang daftar pemain dari snapshot jika kosong
     lives = snap.get("lives") or {}
     order = snap.get("player_order") or []
-    if not state.players and isinstance(order, list):
+    players = snap.get("players")
+    if isinstance(players, list) and players:
+        state.players = players
+    elif not state.players and isinstance(order, list):
         state.players = [
             {"player_id": pid, "username": pid, "lives": lives.get(pid),
              "hand_count": None, "connected": True}
@@ -436,9 +470,16 @@ def _on_reconnect_ack(state, p, now):
                 pl["lives"] = lives[pid]
 
     # Snapshot kosong = game belum mulai (engine None di server) → ke lobby
-    state.phase = PHASE_PLAYING if snap else PHASE_LOBBY
+    actions = snap.get("valid_actions")
+    if isinstance(actions, list):
+        state.valid_actions = actions
+    # Jika server memberi aksi valid saat reconnect, jadikan phase yang
+    # sesuai supaya prompt/discard state tidak tersisa dari turn lama.
+    if state.valid_actions == ["DISCARD"]:
+        state.phase = PHASE_MUST_DISCARD
+    else:
+        state.phase = PHASE_PLAYING if snap else PHASE_LOBBY
     state.reconnect_deadline = None
-    state.valid_actions = []
     state.toast(p.get("message", "Berhasil reconnect"), now)
 
 
@@ -712,7 +753,9 @@ def run_gui(args):
     except Exception:
         VoiceChat = None
 
-    saved = load_session() or {}
+    # Pakai session file yang cocok agar dua client di satu laptop tidak
+    # saling menimpa reconnect identity.
+    saved = load_session(args.host, args.name or "") or {}
     state = ClientState(host=args.host)
     state.ui["username_input"] = args.name or saved.get("username", "")
     state.ui["room_input"] = args.room or ""

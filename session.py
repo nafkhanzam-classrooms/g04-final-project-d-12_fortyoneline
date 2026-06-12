@@ -108,6 +108,9 @@ class PlayerInfo:
         self.sock = sock
         self.connected = True
         self.disconnected_at: Optional[float] = None
+        # Ready awal perlu dipisah dari ready antar ronde supaya game tidak
+        # mulai hanya karena satu pemain menekan READY.
+        self.ready = False  # flag untuk ready di lobby (awal game)
         self.ready_next_round = False  # flag untuk gate antar ronde
 
 
@@ -180,6 +183,12 @@ class GameSession:
                 return "Room penuh"
 
             self._players[player_id] = PlayerInfo(player_id, username, sock)
+            
+            # Saat ada pemain baru masuk lobby, semua ready lama dibatalkan
+            # agar start game tetap menunggu seluruh pemain yang aktif.
+            for p in self._players.values():
+                p.ready = False
+            
             logger.info(f"ROOM {self.room_code} | player_joined player_id={player_id} username={username}")
 
         # Broadcast ke semua: ada pemain baru
@@ -504,10 +513,26 @@ class GameSession:
 
     # ------------------------------------------------------------------
     def _handle_ready(self, player_id: str):
-        """Pemain siap → coba mulai game."""
+        """Pemain siap → tandai ready dan cek apakah semua pemain sudah ready."""
         with self._lock:
             if self.state != "LOBBY":
                 return
+            pinfo = self._players.get(player_id)
+            if not pinfo:
+                return
+            # READY lobby harus jadi per-player gate; jangan langsung start
+            # sebelum semua pemain yang connected sudah ready.
+            pinfo.ready = True
+            
+            # Cek apakah semua pemain yang connected sudah ready
+            connected_players = [p for p in self._players.values() if p.connected]
+            if len(connected_players) < MIN_PLAYERS:
+                return
+            all_ready = all(p.ready for p in connected_players)
+            if not all_ready:
+                return
+        
+        # Semua pemain ready, mulai game
         self.try_start_game()
 
     # ------------------------------------------------------------------
@@ -928,7 +953,11 @@ class GameSession:
             self._reconnect_timers[player_id] = timer
         timer.start()
 
-        # Jika giliran pemain ini, auto-skip
+        # Jika giliran pemain ini, auto-skip kecuali pada initial discard.
+        # Saat ronde baru dimulai, hanya pemain pertama yang punya 5 kartu
+        # dan boleh membuang; kalau dia disconnect, giliran harus tetap
+        # menunggu reconnect agar tidak pindah ke pemain kedua yang hanya
+        # punya 4 kartu.
         # [FIX #11 — Person C] dulu `state` hanya ter-assign di dalam if,
         # sehingga disconnect saat bukan giliran pemain (atau saat masih di
         # lobby) crash dengan UnboundLocalError.
@@ -936,7 +965,8 @@ class GameSession:
             is_current = (self._engine is not None
                           and self._engine.current_player == player_id)
             state = self.state
-        if is_current and state == "PLAYER_TURN":
+            waiting_initial = bool(self._engine and self._engine._waiting_initial_discard)
+        if is_current and state == "PLAYER_TURN" and not waiting_initial:
             self._auto_skip(player_id)
         elif is_current and state == "LAST_TURN_PHASE":
             # [Person C] tanpa ini sesi macet menunggu last turn pemain
@@ -973,8 +1003,28 @@ class GameSession:
         with self._lock:
             if self._engine:
                 snapshot = self._engine.get_reconnect_snapshot(player_id)
+                current = self._engine.current_player
+                waiting_initial = self._engine._waiting_initial_discard
             else:
                 snapshot = {}
+                current = None
+                waiting_initial = False
+
+            # Snapshot reconnect harus membawa roster lengkap supaya client
+            # tidak menampilkan Pxxx sebagai nama pemain setelah reconnect.
+            snapshot["players"] = self._player_list_snapshot()
+
+            # Kirim status giliran yang benar agar client tidak menyimpan
+            # aksi discard/take yang sudah kedaluwarsa saat reconnect.
+            if current == player_id and self.state in ("PLAYER_TURN", "LAST_TURN_PHASE"):
+                snapshot["valid_actions"] = (["DISCARD"] if waiting_initial
+                                             else ["TAKE_DECK", "TAKE_DISCARD", "KNOCK"])
+                snapshot["current_turn_username"] = self._players[player_id].username
+            else:
+                snapshot["valid_actions"] = []
+                snapshot["current_turn_username"] = (
+                    self._players[current].username if current in self._players else None
+                )
 
         _send_to(new_sock, {
             "type": "RECONNECT_ACK",

@@ -315,7 +315,9 @@ def _draw_countdown(screen, state, now):
     if remaining <= 0:
         return
     frac = max(0.0, min(1.0, remaining / 30.0))
-    bar = pygame.Rect(TABLE_CX - 150, 96, 300, 10)
+    # Timer dulu terlalu dekat ke panel lawan, jadi dipindah ke area kosong
+    # di tengah atas agar tidak overlap dengan GUI.
+    bar = pygame.Rect(TABLE_CX - 150, 220, 300, 10)
     pygame.draw.rect(screen, PANEL, bar, border_radius=5)
     color = GREEN if frac > 0.5 else (GOLD if frac > 0.2 else RED)
     fill = pygame.Rect(bar.x, bar.y, int(bar.w * frac), bar.h)
