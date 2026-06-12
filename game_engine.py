@@ -539,16 +539,22 @@ class GameEngine:
 
         return self._resolve_round(knocker=player_id)
 
-    def force_showdown(self) -> dict:
+    def force_showdown(self, knocker=None) -> dict:
         """
-        Dipanggil server saat deck habis (discard_card mengembalikan trigger='DECK_EMPTY').
+        Dipanggil server saat deck habis (discard_card mengembalikan trigger='DECK_EMPTY')
+        ATAU setelah fase last-turn selesai pasca KNOCK.
         Semua kartu dibuka dan skor dihitung.
+
+        [FIX #4 — Person C] Tambah parameter opsional `knocker`: session.py
+        menjalankan alur LAST_TURN_PHASE sendiri (knock TIDAK menutup ronde
+        seketika), lalu memanggil force_showdown(knocker=...) supaya hasil
+        ROUND_END tetap mencantumkan siapa yang knock.
 
         Return: sama dengan _resolve_round().
         """
         if not self.round_active:
             return {'success': False, 'error': 'Ronde belum aktif'}
-        return self._resolve_round(knocker=None)
+        return self._resolve_round(knocker=knocker)
 
     # ── Query state ───────────────────────────────────────────────────────────
 
