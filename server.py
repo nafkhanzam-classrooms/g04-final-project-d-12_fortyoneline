@@ -9,6 +9,15 @@ Tanggung jawab:
   - Registry koneksi aktif
   - Reconnect & disconnect handling
   - UDP relay untuk voice chat
+
+REVISI v3 — disesuaikan dengan kebutuhan Person C (client):
+  - Terima tipe packet langsung dari Person C:
+      RECONNECT, TAKE_DECK, TAKE_DISCARD, DISCARD, KNOCK
+    (bukan ACTION envelope seperti format Person A)
+  - Tipe RECONNECT diterima di _handshake() (Person C tidak kirim RECONNECT_REQ)
+  - Whitelist tipe packet diperbarui sesuai aksi Person C
+  - Validasi per tipe dipisah: ACTION (Person A internal) tetap divalidasi
+    dengan validate_action_packet; tipe Person C divalidasi minimal
 """
 
 import socket
@@ -16,14 +25,16 @@ import threading
 import json
 import logging
 import time
-import random
-import string
+import os
 
+from protocol import encode, decode, encode_error, recv_message
+from game_engine import validate_action_packet, validate_ping_packet, validate_reconnect_packet
 from session import RoomManager
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(levelname)s %(message)s",
@@ -41,40 +52,6 @@ logger = logging.getLogger(__name__)
 TCP_HOST = "0.0.0.0"
 TCP_PORT = 5555
 UDP_PORT = 5556
-BUFFER_SIZE = 4096
-RECV_TIMEOUT = 60  # detik sebelum koneksi dianggap mati
-
-
-# ---------------------------------------------------------------------------
-# Helper: encode / decode sederhana (fallback jika protocol.py belum ada)
-# Saat Person A sudah selesai, import dari protocol:
-#   from protocol import encode, decode, recv_message
-# ---------------------------------------------------------------------------
-def _encode(msg: dict) -> bytes:
-    return (json.dumps(msg) + "\n").encode("utf-8")
-
-
-def _decode(raw: str) -> dict:
-    return json.loads(raw.strip())
-
-
-def _recv_message(sock: socket.socket) -> dict | None:
-    """
-    Baca satu packet (diakhiri '\\n') dari socket.
-    Return None jika koneksi terputus atau timeout.
-    """
-    buf = b""
-    try:
-        while True:
-            chunk = sock.recv(BUFFER_SIZE)
-            if not chunk:
-                return None
-            buf += chunk
-            if b"\n" in buf:
-                line, _ = buf.split(b"\n", 1)
-                return _decode(line.decode("utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +63,8 @@ class ClientHandler(threading.Thread):
 
     Lifecycle:
       1. Terima packet LOGIN → registrasi ke room_manager
-      2. Loop: baca packet → dispatch ke session
+         Atau packet RECONNECT_REQ → validasi dan restore session
+      2. Loop: baca packet → validasi → dispatch ke session
       3. Saat disconnect → beri tahu session
     """
 
@@ -120,10 +98,10 @@ class ClientHandler(threading.Thread):
             self._on_disconnect()
 
     # ------------------------------------------------------------------
-    # Handshake: terima LOGIN atau RECONNECT
+    # Handshake: terima LOGIN atau RECONNECT_REQ
     # ------------------------------------------------------------------
     def _handshake(self):
-        msg = _recv_message(self.conn)
+        msg = recv_message(self.conn)
         if msg is None:
             return
 
@@ -132,116 +110,153 @@ class ClientHandler(threading.Thread):
         # --- LOGIN baru ---
         if msg_type == "LOGIN":
             payload = msg.get("payload", {})
-            username = payload.get("username", "").strip()
-            room_code = payload.get("room_code", "").strip().upper()
+            if not isinstance(payload, dict):
+                self.conn.sendall(encode_error("Payload LOGIN tidak valid"))
+                return
+
+            username  = payload.get("username", "").strip()
+            room_code = payload.get("room_code", "").strip().upper() or None
 
             if not username:
-                self._send({"type": "ERROR", "payload": {"message": "Username kosong"}})
+                self.conn.sendall(encode_error("Username tidak boleh kosong"))
                 return
 
             player_id, room_code, err = self.room_manager.register_player(
                 username=username,
-                room_code=room_code or None,
+                room_code=room_code,
                 sock=self.conn,
             )
             if err:
-                self._send({"type": "ERROR", "payload": {"message": err}})
+                self.conn.sendall(encode_error(err))
                 return
 
             self.player_id = player_id
             self.room_code = room_code
             self.server.register_connection(player_id, self)
 
-            self._send({
-                "type": "LOGIN_ACK",
-                "payload": {
-                    "player_id": player_id,
-                    "room_code": room_code,
-                    "message": "Berhasil bergabung ke room",
-                },
-            })
+            # Kirim LOGIN_ACK
+            self.conn.sendall(encode("LOGIN_ACK", {
+                "player_id": player_id,
+                "room_code": room_code,
+                "session_id": self.room_manager.get_session_id(room_code),
+                "message": "Berhasil bergabung ke room",
+            }))
             logger.info(f"LOGIN player_id={player_id} username={username} room={room_code}")
 
-        # --- RECONNECT ---
-        elif msg_type == "RECONNECT":
-            payload = msg.get("payload", {})
-            player_id = payload.get("player_id", "")
-            room_code = payload.get("room_code", "").upper()
+        # --- RECONNECT (Person C kirim "RECONNECT", bukan "RECONNECT_REQ") ---
+        # Diterima keduanya agar kompatibel jika Person A/C tidak sinkron
+        elif msg_type in ("RECONNECT", "RECONNECT_REQ"):
+            payload    = msg.get("payload", {})
+            if not isinstance(payload, dict):
+                self.conn.sendall(encode_error("Payload RECONNECT tidak valid"))
+                return
 
-            ok, err = self.room_manager.reconnect_player(
+            player_id  = payload.get("player_id", "").strip()
+            # Person C mungkin kirim session_id atau room_code — terima keduanya
+            session_id = payload.get("session_id", "").strip()
+
+            if not player_id or not session_id:
+                self.conn.sendall(encode_error(
+                    "RECONNECT membutuhkan field 'player_id' dan 'session_id'"
+                ))
+                return
+
+            ok, room_code, err = self.room_manager.reconnect_player(
                 player_id=player_id,
-                room_code=room_code,
+                session_id=session_id,
                 new_sock=self.conn,
             )
             if not ok:
-                self._send({"type": "ERROR", "payload": {"message": err}})
+                self.conn.sendall(encode_error(err))
                 return
 
             self.player_id = player_id
             self.room_code = room_code
             self.server.register_connection(player_id, self)
-            logger.info(f"RECONNECT player_id={player_id} room={room_code}")
+            logger.info(f"RECONNECT player_id={player_id} session_id={session_id}")
 
         else:
-            self._send({"type": "ERROR", "payload": {"message": "Harap kirim LOGIN terlebih dahulu"}})
+            self.conn.sendall(encode_error("Harap kirim LOGIN atau RECONNECT terlebih dahulu"))
 
     # ------------------------------------------------------------------
-    # Main loop: baca packet → dispatch
+    # Main loop: baca packet → validasi → dispatch
     # ------------------------------------------------------------------
     def _message_loop(self):
         session = self.room_manager.get_session(self.room_code)
         if session is None:
             return
 
+        # Tipe packet yang dikirim langsung oleh Person C (tidak dalam ACTION envelope)
+        # dan yang valid dari internal (ACTION envelope milik engine Person A)
+        VALID_TYPES = {
+            "ACTION",           # envelope Person A (divalidasi validate_action_packet)
+            "PING",
+            "READY",
+            "TAKE_DECK",        # Person C: ambil dari deck
+            "TAKE_DISCARD",     # Person C: ambil dari discard pile
+            "DISCARD",          # Person C: buang kartu (payload = card object)
+            "KNOCK",            # Person C: knock langsung
+            "READY_NEXT_ROUND",
+            "CHAT",
+            "EMOJI_REACT",
+        }
+
         while self.running:
-            msg = _recv_message(self.conn)
+            msg = recv_message(self.conn)
             if msg is None:
                 break  # koneksi terputus
 
-            msg_type = msg.get("type", "")
-
-            # Validasi basic
-            if not self._is_valid_packet(msg):
-                self._send({"type": "ERROR", "payload": {"message": "Packet tidak valid"}})
-                logger.warning(f"INVALID_PACKET player={self.player_id} msg={msg}")
+            if not isinstance(msg, dict) or "type" not in msg:
+                self.conn.sendall(encode_error("Format packet tidak valid"))
                 continue
 
-            logger.info(f"RECV player={self.player_id} type={msg_type}")
+            msg_type = msg.get("type", "")
+            payload  = msg.get("payload", {})
 
-            # Dispatch
+            # Pastikan payload selalu dict
+            if not isinstance(payload, dict):
+                payload = {}
+                msg["payload"] = payload
+
+            if msg_type not in VALID_TYPES:
+                self.conn.sendall(encode_error(f"Tipe packet tidak dikenal: {msg_type!r}"))
+                logger.warning(f"UNKNOWN_TYPE player={self.player_id} type={msg_type}")
+                continue
+
+            # Validasi spesifik per tipe
+            if msg_type == "ACTION":
+                # Packet ACTION dipakai jalur internal / jika Person C berubah pikiran
+                ok, reason = validate_action_packet(msg)
+                if not ok:
+                    self.conn.sendall(encode_error(reason))
+                    logger.warning(f"INVALID_ACTION player={self.player_id} reason={reason}")
+                    continue
+
+            elif msg_type == "PING":
+                ok, reason = validate_ping_packet(msg)
+                if not ok:
+                    self.conn.sendall(encode_error(reason))
+                    continue
+
+            # Tipe Person C yang lain (TAKE_DECK, TAKE_DISCARD, DISCARD, KNOCK, dsb)
+            # tidak butuh validasi struktur ketat di level server —
+            # validasi bisnis (giliran, state) dilakukan di dalam session.handle_packet()
+
+            logger.info(f"RECV player={self.player_id} type={msg_type}")
             session.handle_packet(player_id=self.player_id, msg=msg)
 
     # ------------------------------------------------------------------
     def _on_disconnect(self):
         logger.info(f"DISCONNECT player={self.player_id} addr={self.addr}")
-        self.conn.close()
+        try:
+            self.conn.close()
+        except OSError:
+            pass
         if self.player_id and self.room_code:
             session = self.room_manager.get_session(self.room_code)
             if session:
                 session.on_player_disconnect(self.player_id)
             self.server.unregister_connection(self.player_id)
-
-    # ------------------------------------------------------------------
-    def _send(self, msg: dict):
-        try:
-            self.conn.sendall(_encode(msg))
-        except OSError:
-            pass
-
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _is_valid_packet(msg: dict) -> bool:
-        """Validasi struktur packet minimal."""
-        if not isinstance(msg, dict):
-            return False
-        if "type" not in msg:
-            return False
-        allowed_types = {
-            "LOGIN", "RECONNECT", "READY",
-            "TAKE_DECK", "TAKE_DISCARD", "DISCARD", "KNOCK",
-            "CHAT", "EMOJI_REACT", "PING", "READY_NEXT_ROUND",
-        }
-        return msg["type"] in allowed_types
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +266,7 @@ class UDPVoiceRelay(threading.Thread):
     """
     Thread terpisah untuk relay audio UDP antar pemain dalam satu room.
     Packet format: {"type":"VOICE_DATA","room_code":"XXX","player_id":"P001","audio_chunk":"<b64>"}
-    Server relay ke semua pemain lain dalam room yang sama.
+    Server relay ke semua pemain lain dalam room yang sama tanpa menyentuh TCP.
     """
 
     def __init__(self, room_manager: "RoomManager"):
@@ -259,8 +274,7 @@ class UDPVoiceRelay(threading.Thread):
         self.room_manager = room_manager
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((TCP_HOST, UDP_PORT))
-        # Map player_id → UDP address (diisi saat client mengirim packet pertama)
-        self._addr_map: dict[str, tuple] = {}
+        self._addr_map: dict[str, tuple] = {}   # player_id → UDP addr
         self._lock = threading.Lock()
 
     def run(self):
@@ -282,21 +296,16 @@ class UDPVoiceRelay(threading.Thread):
             return
 
         player_id = msg.get("player_id", "")
-        room_code = msg.get("room_code", "").upper()
-
+        room_code  = msg.get("room_code", "").upper()
         if not player_id or not room_code:
             return
 
-        # Simpan / perbarui alamat UDP pengirim
         with self._lock:
             self._addr_map[player_id] = addr
 
-        # Kirim ke semua pemain lain dalam room
         session = self.room_manager.get_session(room_code)
         if session is None:
             return
-
-        relay_data = data  # kirim ulang packet mentah
 
         with self._lock:
             for pid in session.get_connected_player_ids():
@@ -305,7 +314,7 @@ class UDPVoiceRelay(threading.Thread):
                 dest = self._addr_map.get(pid)
                 if dest:
                     try:
-                        self.sock.sendto(relay_data, dest)
+                        self.sock.sendto(data, dest)
                     except OSError:
                         pass
 
@@ -316,10 +325,8 @@ class UDPVoiceRelay(threading.Thread):
 class GameServer:
     """
     Entry point server.
-
-    - Membuat TCP socket utama
-    - Menjalankan UDPVoiceRelay di thread terpisah
-    - Accept loop: spawn ClientHandler per koneksi
+    - TCP socket utama + accept loop
+    - UDPVoiceRelay di thread terpisah
     - Registry koneksi aktif (player_id → ClientHandler)
     """
 
@@ -327,12 +334,9 @@ class GameServer:
         self.host = host
         self.port = port
         self.room_manager = RoomManager()
-
-        # Registry koneksi: player_id → ClientHandler
         self._connections: dict[str, ClientHandler] = {}
         self._conn_lock = threading.Lock()
 
-    # ------------------------------------------------------------------
     def register_connection(self, player_id: str, handler: "ClientHandler"):
         with self._conn_lock:
             self._connections[player_id] = handler
@@ -341,20 +345,11 @@ class GameServer:
         with self._conn_lock:
             self._connections.pop(player_id, None)
 
-    def get_handler(self, player_id: str) -> "ClientHandler | None":
-        with self._conn_lock:
-            return self._connections.get(player_id)
-
-    # ------------------------------------------------------------------
     def start(self):
-        import os
         os.makedirs("logs", exist_ok=True)
 
-        # UDP Voice Relay
-        udp_relay = UDPVoiceRelay(self.room_manager)
-        udp_relay.start()
+        UDPVoiceRelay(self.room_manager).start()
 
-        # TCP Server
         server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_sock.bind((self.host, self.port))
@@ -364,13 +359,7 @@ class GameServer:
         try:
             while True:
                 conn, addr = server_sock.accept()
-                handler = ClientHandler(
-                    conn=conn,
-                    addr=addr,
-                    room_manager=self.room_manager,
-                    server=self,
-                )
-                handler.start()
+                ClientHandler(conn, addr, self.room_manager, self).start()
         except KeyboardInterrupt:
             logger.info("Server dihentikan")
         finally:
