@@ -10,7 +10,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 try:
-    from game_engine import GameEngine
+    from server.game_engine import GameEngine
     _HAS_ENGINE = True
 except ImportError:
     GameEngine = None
@@ -19,7 +19,6 @@ except ImportError:
 
 def _encode(msg: dict) -> bytes:
     return (json.dumps(msg) + "\n").encode("utf-8")
-
 
 def _send_to(sock: socket.socket, msg: dict):
     try:
@@ -38,7 +37,6 @@ def _new_room_code(existing: set) -> str:
         code = "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
         if code not in existing:
             return code
-
 
 def _new_player_id(existing: set) -> str:
     while True:
@@ -153,28 +151,19 @@ class GameSession:
             self._engine.start_round()
             self.state = "DEAL_CARDS"
             self._last_turn_remaining = set()
-            self._knocker = None  # [FIX #4 — Person C]
+            self._knocker = None
 
-            # Reset ready flag
             for p in self._players.values():
                 p.ready_next_round = False
 
         logger.info(f"ROOM {self.room_code} | DEAL_CARDS")
-
-        # Kirim kartu tangan masing-masing (private)
         self._send_all_hands()
-
-        # Broadcast game state awal
         self._broadcast_game_state()
-
         with self._lock:
             self.state = "PLAYER_TURN"
-
-        # Kirim giliran pertama
         self._prompt_current_player()
 
     def _send_all_hands(self):
-        """Kirim YOUR_HAND secara private ke setiap pemain."""
         with self._lock:
             if self._engine is None:
                 return
@@ -182,19 +171,14 @@ class GameSession:
                 if not pinfo.connected:
                     continue
                 state = self._engine.get_state_for_player(pid)
-                # [FIX #1 — Person C] engine memakai key 'your_hand', bukan
-                # 'hand' — sebelumnya YOUR_HAND selalu terkirim kosong.
+
                 hand = state.get("your_hand", [])
                 _send_to(pinfo.sock, {
                     "type": "YOUR_HAND",
                     "payload": {"cards": hand},
                 })
 
-    # ======================================================================
-    # Turn management
-    # ======================================================================
     def _prompt_current_player(self):
-        """Kirim VALID_ACTIONS ke pemain aktif, mulai timer."""
         with self._lock:
             if self._engine is None:
                 return
@@ -202,11 +186,9 @@ class GameSession:
             pinfo = self._players.get(current)
 
         if pinfo is None or not pinfo.connected:
-            # Pemain disconnect, auto-skip
             self._auto_skip(current)
             return
 
-        # Broadcast siapa yang giliran
         self._broadcast({
             "type": "TURN_INDICATOR",
             "payload": {
@@ -214,26 +196,17 @@ class GameSession:
                 "username": pinfo.username,
             },
         })
-
-        # [FIX #5 — Person C] Awal ronde: pemain pertama (5 kartu) wajib
-        # INITIAL DISCARD dulu — tanpa ini engine menolak semua aksi dengan
-        # "Ronde belum aktif". Client cukup mengirim DISCARD biasa;
-        # _handle_discard yang merutekan ke engine.initial_discard().
         with self._lock:
             waiting_initial = (self._engine is not None
                                and self._engine._waiting_initial_discard)
         actions = (["DISCARD"] if waiting_initial
                    else ["TAKE_DECK", "TAKE_DISCARD", "KNOCK"])
-
-        # Kirim valid actions ke pemain aktif
         _send_to(pinfo.sock, {
             "type": "VALID_ACTIONS",
             "payload": {
                 "actions": actions,
             },
         })
-
-        # Start turn timer
         self._cancel_turn_timer()
         self._turn_deadline = time.time() + TURN_TIMEOUT_SECONDS
         self._turn_timer = threading.Timer(
@@ -247,7 +220,7 @@ class GameSession:
         if self._turn_timer:
             self._turn_timer.cancel()
             self._turn_timer = None
-            self._turn_deadline = None # FIX: Reset deadline
+            self._turn_deadline = None
 
     def _on_turn_timeout(self, player_id: str):
         logger.info(f"ROOM {self.room_code} | TURN_TIMEOUT player={player_id}")
@@ -256,24 +229,20 @@ class GameSession:
             if self._engine is None:
                 return
             if self._engine.current_player != player_id:
-                return  # giliran sudah berpindah
+                return
             if self._engine._waiting_initial_discard:
                 self._engine.initial_discard(player_id, 0)
             else:
-                # FIX 3: Cek apakah pemain sudah memegang 5 kartu (sudah take)
                 hand = self._engine.hands.get(player_id, [])
                 if len(hand) > 4:
-                    # Sudah ambil kartu, jadi langsung paksa buang kartu indeks pertama (0)
                     result = self._engine.discard_card(player_id, 0)
                 else:
-                    # Belum ambil kartu, paksa ambil dari deck lalu buang
                     take = self._engine.take_card(player_id, "DECK")
                     if not take.get("success"):
                         result = {"trigger": "DECK_EMPTY"}
                     else:
                         result = self._engine.discard_card(player_id, 0)
 
-        # Sinkronkan tangan pemain yang kena auto-discard
         pinfo = self._players.get(player_id)
         if pinfo and pinfo.connected:
             with self._lock:
@@ -287,22 +256,13 @@ class GameSession:
         if result.get("trigger") == "DECK_EMPTY":
             self._do_showdown()
             return
-        # giliran sudah maju di dalam engine — cukup prompt pemain berikutnya
         self._prompt_current_player()
 
     def _auto_skip(self, player_id: str):
-        """Skip giliran pemain yang disconnect."""
         logger.info(f"ROOM {self.room_code} | AUTO_SKIP player={player_id}")
         self._advance_turn()
 
     def _advance_turn(self):
-        """Minta engine maju ke pemain berikutnya.
-
-        [FIX #6 — Person C] Sekarang HANYA dipakai jalur auto-skip
-        (pemain disconnect, belum melakukan aksi apa pun). Jalur discard
-        tidak memanggil ini lagi karena engine.discard_card() sudah
-        memajukan giliran sendiri — dulu giliran maju dua kali.
-        """
         with self._lock:
             if self._engine is None:
                 return
@@ -317,20 +277,11 @@ class GameSession:
             self._prompt_current_player()
 
     def _handle_last_turn_advance(self):
-        """
-        Setelah seorang pemain selesai giliran terakhir,
-        cek apakah semua sudah selesai → showdown.
-        """
         with self._lock:
             remaining = self._last_turn_remaining.copy()
-
         if not remaining:
             self._do_showdown()
         else:
-            # [FIX #9 — Person C] Giliran terakhir mengikuti urutan duduk
-            # engine (current_player), bukan next(iter(set)) yang acak.
-            # Engine juga memvalidasi take/discard terhadap current_player,
-            # jadi urutannya memang HARUS sinkron dengan engine.
             with self._lock:
                 if self._engine is None:
                     return
@@ -343,8 +294,6 @@ class GameSession:
 
             pinfo = self._players.get(next_pid)
             if pinfo and pinfo.connected:
-                # [Person C] TURN_INDICATOR juga di last turn supaya
-                # countdown & highlight giliran di client tetap jalan.
                 self._broadcast({
                     "type": "TURN_INDICATOR",
                     "payload": {
@@ -365,10 +314,8 @@ class GameSession:
                 )
                 self._turn_timer.start()
             else:
-                # Pemain ini disconnect, skip
                 with self._lock:
                     self._last_turn_remaining.discard(next_pid)
-                    # [FIX #9 — Person C] engine ikut maju saat skip
                     if self._engine is not None:
                         self._engine._advance_turn()
                 self._handle_last_turn_advance()
@@ -376,7 +323,6 @@ class GameSession:
     def _on_last_turn_timeout(self, player_id: str):
         logger.info(f"ROOM {self.room_code} | LAST_TURN_TIMEOUT player={player_id}")
         with self._lock:
-            # FIX 3: Jika timeout di giliran terakhir tapi menahan 5 kartu, paksa buang
             if self._engine:
                 hand = self._engine.hands.get(player_id, [])
                 if len(hand) > 4:
@@ -385,12 +331,8 @@ class GameSession:
             self._last_turn_remaining.discard(player_id)
         self._handle_last_turn_advance()
 
-    # ======================================================================
-    # Packet handler (dipanggil dari ClientHandler)
-    # ======================================================================
     def handle_packet(self, player_id: str, msg: dict):
         msg_type = msg.get("type", "")
-
         if msg_type == "READY":
             self._handle_ready(player_id)
         elif msg_type == "UNREADY":
@@ -423,33 +365,23 @@ class GameSession:
                     "payload": {"message": f"Tipe packet tidak dikenal: {msg_type}"},
                 })
 
-    # ------------------------------------------------------------------
     def _handle_ready(self, player_id: str):
-        """Pemain siap → tandai ready dan cek apakah semua pemain sudah ready."""
         with self._lock:
             if self.state != "LOBBY":
                 return
             pinfo = self._players.get(player_id)
             if not pinfo:
                 return
-            # READY lobby harus jadi per-player gate; jangan langsung start
-            # sebelum semua pemain yang connected sudah ready.
             pinfo.ready = True
-            
-            # Cek apakah semua pemain yang connected sudah ready
             connected_players = [p for p in self._players.values() if p.connected]
             if len(connected_players) < MIN_PLAYERS:
                 return
             all_ready = all(p.ready for p in connected_players)
             if not all_ready:
                 return
-        
-        # Semua pemain ready, mulai game
         self.try_start_game()
 
-    # ------------------------------------------------------------------
     def _handle_unready(self, player_id: str):
-        """Batalkan status READY pemain di lobby."""
         with self._lock:
             if self.state != "LOBBY":
                 return
@@ -458,9 +390,7 @@ class GameSession:
                 pinfo.ready = False
         logger.info(f"ROOM {self.room_code} | UNREADY player={player_id}")
 
-    # ------------------------------------------------------------------
     def _handle_unready_next_round(self, player_id: str):
-        """Batalkan status READY_NEXT_ROUND pemain."""
         with self._lock:
             if self.state != "WAITING_READY":
                 return
@@ -469,7 +399,6 @@ class GameSession:
                 pinfo.ready_next_round = False
         logger.info(f"ROOM {self.room_code} | UNREADY_NEXT_ROUND player={player_id}")
 
-    # ------------------------------------------------------------------
     def _handle_ping(self, player_id: str):
         pinfo = self._players.get(player_id)
         if pinfo:
@@ -478,16 +407,13 @@ class GameSession:
                 "payload": {"timestamp": time.time()},
             })
 
-    # ------------------------------------------------------------------
     def _handle_take(self, player_id: str, source: str):
-        """Proses TAKE_DECK atau TAKE_DISCARD."""
         with self._lock:
             if self._engine is None:
                 return
             state = self.state
             current = self._engine.current_player
 
-        # Validasi: hanya pemain aktif yang boleh aksi di giliran normal
         if state == "PLAYER_TURN" and current != player_id:
             pinfo = self._players.get(player_id)
             if pinfo:
@@ -497,7 +423,6 @@ class GameSession:
                 })
             return
 
-        # Last turn: hanya pemain yang masuk daftar last-turn
         if state == "LAST_TURN_PHASE":
             with self._lock:
                 if player_id not in self._last_turn_remaining:
@@ -505,11 +430,7 @@ class GameSession:
                     if pinfo:
                         _send_to(pinfo.sock, {"type": "ERROR", "payload": {"message": "Bukan giliran terakhir Anda"}})
                     return
-
-        # [FIX #2 — Person C] engine butuh source 'DECK'/'DISCARD' uppercase,
-        # dan mengembalikan dict {'success', 'card', ...} — bukan Card/None.
-        # Dulu: lowercase selalu gagal, dan karena return dict != None,
-        # kegagalan lolos sebagai sukses dengan card = seluruh dict hasil.
+                
         with self._lock:
             result = self._engine.take_card(player_id, source.upper())
 
@@ -522,9 +443,7 @@ class GameSession:
                     "payload": {"message": err or f"Tidak bisa mengambil dari {source}"},
                 })
             return
-        card = result["card"]  # sudah berupa dict {'suit', 'rank'}
-
-        # Kirim kartu baru ke pemain tersebut (private)
+        card = result["card"]
         pinfo = self._players.get(player_id)
         if pinfo:
             _send_to(pinfo.sock, {
@@ -534,41 +453,32 @@ class GameSession:
                     "card": card,
                 },
             })
-            # Kirim hand terkini (private)
             with self._lock:
                 current_state = self._engine.get_state_for_player(player_id)
             _send_to(pinfo.sock, {
                 "type": "YOUR_HAND",
-                # [FIX #1 — Person C] key engine = 'your_hand'
+
                 "payload": {"cards": current_state.get("your_hand", [])},
             })
-
         self._broadcast_game_state()
-
-        # Setelah take, pemain wajib discard — kirim valid actions DISCARD saja
         if pinfo and pinfo.connected:
             _send_to(pinfo.sock, {
                 "type": "VALID_ACTIONS",
                 "payload": {"actions": ["DISCARD"]},
             })
-
         logger.info(f"ROOM {self.room_code} | {source.upper()} player={player_id}")
 
-    # ------------------------------------------------------------------
     def _handle_discard(self, player_id: str, msg: dict):
         with self._lock:
             if self._engine is None:
                 return
             state = self.state
             current = self._engine.current_player
-
-        # Validasi giliran
         if state == "PLAYER_TURN" and current != player_id:
             pinfo = self._players.get(player_id)
             if pinfo:
                 _send_to(pinfo.sock, {"type": "ERROR", "payload": {"message": "Bukan giliran Anda"}})
             return
-
         card_dict = msg.get("payload", {}).get("card", {})
         if not card_dict:
             pinfo = self._players.get(player_id)
@@ -576,12 +486,6 @@ class GameSession:
                 _send_to(pinfo.sock, {"type": "ERROR", "payload": {"message": "Payload kartu tidak valid"}})
             return
 
-        # [FIX #3 — Person C] engine.discard_card menerima card_index (int),
-        # bukan card dict — terjemahkan dict {suit, rank} ke index di tangan.
-        # [FIX #5 — Person C] discard pertama ronde dirutekan ke
-        # engine.initial_discard() (buang wajib pemain pertama yang dapat
-        # 5 kartu) — dulu tidak pernah dipanggil siapa pun sehingga ronde
-        # tidak pernah aktif.
         with self._lock:
             hand = self._engine.hands.get(player_id, [])
             card_index = next(
@@ -610,9 +514,6 @@ class GameSession:
 
         logger.info(f"ROOM {self.room_code} | DISCARD player={player_id} card={card_dict}")
         self._cancel_turn_timer()
-
-        # [Person C] Sinkronkan tangan pemain setelah buang — tanpa ini
-        # client masih menampilkan kartu yang sudah dibuang.
         pinfo = self._players.get(player_id)
         if pinfo and pinfo.connected:
             with self._lock:
@@ -621,15 +522,11 @@ class GameSession:
                 "type": "YOUR_HAND",
                 "payload": {"cards": pstate.get("your_hand", [])},
             })
-
         self._broadcast_game_state()
-
-        # [FIX #8 — Person C] deck habis setelah buang → langsung showdown.
-        # Dulu trigger DECK_EMPTY dari engine tidak pernah dicek.
         if result.get("trigger") == "DECK_EMPTY":
             self._do_showdown()
             return
-
+        
         with self._lock:
             cur_state = self.state
 
@@ -638,12 +535,8 @@ class GameSession:
                 self._last_turn_remaining.discard(player_id)
             self._handle_last_turn_advance()
         else:
-            # [FIX #6 — Person C] engine.discard_card()/initial_discard()
-            # sudah memajukan giliran — dulu _advance_turn() di sini membuat
-            # giliran maju DUA kali dan pemain terlewati.
             self._prompt_current_player()
 
-    # ------------------------------------------------------------------
     def _handle_knock(self, player_id: str):
         with self._lock:
             if self._engine is None:
@@ -655,23 +548,12 @@ class GameSession:
                 if pinfo:
                     _send_to(pinfo.sock, {"type": "ERROR", "payload": {"message": "Bukan giliran Anda"}})
                 return
-            # [FIX #4 — Person C] JANGAN panggil engine.knock() — method itu
-            # langsung menutup ronde & menghitung skor, bertabrakan dengan
-            # desain LAST_TURN_PHASE session ini. Keputusan semantik:
-            # session yang memegang alur last-turn (sesuai aturan 41: pemain
-            # lain dapat satu giliran terakhir), knocker cukup dicatat dan
-            # showdown dilakukan via engine.force_showdown(knocker=...).
             if not self._engine.round_active:
                 return
             self._knocker = player_id
-            self._engine.log.record(self._engine.round_number, player_id,
-                                    "KNOCK", {})
-
-            # Tentukan pemain yang mendapat giliran terakhir (semua kecuali knocker)
+            self._engine.log.record(self._engine.round_number, player_id, "KNOCK", {})
             active = self._engine.active_players
             self._last_turn_remaining = set(p for p in active if p != player_id)
-            # [FIX #4 — Person C] majukan giliran engine melewati knocker
-            # supaya last turn berjalan sesuai urutan duduk (lihat FIX #9).
             self._engine._advance_turn()
             self.state = "KNOCK_TRIGGERED"
 
@@ -693,26 +575,20 @@ class GameSession:
 
         self._handle_last_turn_advance()
 
-    # ------------------------------------------------------------------
     def _do_showdown(self):
-        """Setelah semua last turn: reveal → score → life → eliminasi."""
         with self._lock:
             if self._engine is None:
                 return
             self.state = "REVEAL"
             result = self._engine.force_showdown(knocker=self._knocker)
             self._knocker = None
-            self._last_round_result = result # FIX: Simpan hasil sebelum di-broadcast
+            self._last_round_result = result
 
         logger.info(f"ROOM {self.room_code} | SHOWDOWN result={result}")
-
-        # Kirim hasil ronde
         self._broadcast({
             "type": "ROUND_END",
             "payload": result,
         })
-
-        # Cek game over
         with self._lock:
             active = self._engine.active_players if self._engine else []
 
@@ -734,7 +610,6 @@ class GameSession:
             logger.info(f"ROOM {self.room_code} | GAME_OVER winner={winner_id}")
             return
 
-        # Minta konfirmasi semua pemain sebelum ronde berikutnya
         with self._lock:
             self.state = "WAITING_READY"
             for p in self._players.values():
@@ -745,12 +620,7 @@ class GameSession:
             "payload": {},
         })
 
-    # ------------------------------------------------------------------
     def _handle_ready_next_round(self, player_id: str):
-        """
-        Terima konfirmasi siap dari pemain.
-        Mulai ronde baru ketika SEMUA pemain aktif sudah siap.
-        """
         with self._lock:
             if self.state != "WAITING_READY":
                 return
@@ -758,7 +628,7 @@ class GameSession:
                 return
             self._players[player_id].ready_next_round = True
 
-            # Cek apakah semua pemain aktif (connected) sudah ready
+
             active_connected = [
                 p for p in self._players.values()
                 if p.connected
@@ -773,12 +643,8 @@ class GameSession:
             with self._lock:
                 pinfo = self._players.get(player_id)
                 if pinfo:
-                    pinfo.left_intentionally = True # Tandai bahwa ia sengaja keluar
+                    pinfo.left_intentionally = True
 
-    # ------------------------------------------------------------------
-    # [FIX #10 — Person C] handle_packet men-dispatch CHAT/EMOJI_REACT ke
-    # dua method ini, tapi keduanya tidak pernah didefinisikan →
-    # AttributeError mematikan thread handler & memutus koneksi pemain.
     def _handle_chat(self, player_id: str, msg: dict):
         pinfo = self._players.get(player_id)
         if pinfo is None:
@@ -811,11 +677,7 @@ class GameSession:
             },
         })
 
-    # ======================================================================
-    # Broadcast & private send
-    # ======================================================================
     def _broadcast(self, msg: dict):
-        """Kirim packet ke semua pemain yang terhubung."""
         with self._lock:
             targets = [(p.player_id, p.sock) for p in self._players.values() if p.connected]
         for pid, sock in targets:
@@ -825,21 +687,11 @@ class GameSession:
                 pass
 
     def _broadcast_game_state(self):
-        """
-        Kirim GAME_STATE (tanpa kartu lawan) ke semua pemain.
-        Kartu tangan masing-masing dikirim via YOUR_HAND secara private.
-        """
         with self._lock:
             if self._engine is None:
                 return
             full = self._engine.get_full_state()
             players_snap = list(self._players.items())
-
-        # Buat GAME_STATE publik (tanpa hand)
-        # [FIX #7 — Person C] key dari engine.get_full_state() adalah
-        # current_player / deck_remaining / top_discard / hands — bukan
-        # current_turn / deck_count / discard_top / hand_counts. Dulu semua
-        # field ini selalu None di client.
         hands = full.get("hands", {})
         public_state = {
             "current_turn": full.get("current_player"),
@@ -857,12 +709,8 @@ class GameSession:
                 for pid, p in players_snap
             ],
         }
-
         self._broadcast({"type": "GAME_STATE", "payload": public_state})
 
-    # ======================================================================
-    # Disconnect & Reconnect
-    # ======================================================================
     def on_player_disconnect(self, player_id: str):
         with self._lock:
             pinfo = self._players.get(player_id)
@@ -871,11 +719,10 @@ class GameSession:
             pinfo.connected = False
             pinfo.disconnected_at = time.time()
             intentionally = getattr(pinfo, 'left_intentionally', False)
-            state = self.state # Catat state saat ini
+            state = self.state
 
         logger.info(f"ROOM {self.room_code} | DISCONNECT player={player_id}")
 
-        # TAMBAHKAN BLOK INI: Jika di Lobby, langsung hapus pemain seutuhnya
         if self.state == "LOBBY":
             with self._lock:
                 self._players.pop(player_id, None)
@@ -888,9 +735,7 @@ class GameSession:
                     "username": pinfo.username,
                     "message": f"{pinfo.username} keluar dari room"
                 }
-            })
-            
-            # Broadcast snapshot terbaru untuk memaksa update UI roster Lobby di client
+            })      
             self._broadcast({
                 "type": "PLAYER_JOINED",
                 "payload": {
@@ -903,11 +748,10 @@ class GameSession:
             return
 
         if intentionally:
-            # FIX NOMOR 2: Eksekusi mati di engine & hapus dari daftar room aktif
             with self._lock:
                 if self._engine is not None and player_id in self._engine.lives:
-                    self._engine.lives[player_id] = 0 # Set nyawa jadi 0 agar engine skip gilirannya
-                self._players.pop(player_id, None)    # Hapus dari kamus room pemain aktif
+                    self._engine.lives[player_id] = 0
+                self._players.pop(player_id, None)
                 self._reconnect_timers.pop(player_id, None)
 
             self._broadcast({
@@ -917,8 +761,6 @@ class GameSession:
                     "username": pinfo.username,
                 },
             })
-            
-            # Cek instan: jika sisa 1 pemain hidup akibat ditinggal leave, langsung GAME OVER
             with self._lock:
                 active = self._engine.active_players if self._engine else []
             if self._engine is not None and len(active) <= 1:
@@ -936,7 +778,6 @@ class GameSession:
                     self.state = "GAME_OVER"
                 return
         else:
-            # Jika tidak sengaja putus (RTO/DC biasa), beri grace period untuk masuk kembali
             timer = threading.Timer(
                 RECONNECT_GRACE_SECONDS,
                 self._on_reconnect_timeout,
@@ -946,7 +787,6 @@ class GameSession:
                 self._reconnect_timers[player_id] = timer
             timer.start()
 
-        # --- Bagian sinkronisasi gerak otomatis pasca putus koneksi ---
         with self._lock:
             is_current = (self._engine is not None and self._engine.current_player == player_id)
             waiting_initial = bool(self._engine and self._engine._waiting_initial_discard)
@@ -958,26 +798,19 @@ class GameSession:
                 self._last_turn_remaining.discard(player_id)
                 if self._engine is not None:
                     self._engine._advance_turn()
-            self._handle_last_turn_advance()
-            
-        # FIX TAMBAHAN: Jika dia leave saat ronde berakhir, langsung cek kesiapan pemain sisa
+            self._handle_last_turn_advance() 
+
         elif state == "WAITING_READY":
             with self._lock:
                 active_connected = [p for p in self._players.values() if p.connected]
                 all_ready = all(p.ready_next_round for p in active_connected) if active_connected else False
             if all_ready:
-                self._start_round()
-                
-        # Selalu perbarui visual scoreboard pemain lain setelah ada perubahan data room
+                self._start_round()    
+
         if self._engine is not None:
             self._broadcast_game_state()
 
     def reconnect_player(self, player_id: str, new_sock: socket.socket) -> tuple[bool, str]:
-        """
-        Panggil setelah validasi identitas di RoomManager.
-        Kirim snapshot state terkini ke pemain yang reconnect.
-        Return (True, "") jika sukses, (False, pesan_error) jika gagal.
-        """
         with self._lock:
             pinfo = self._players.get(player_id)
             if pinfo is None:
@@ -987,14 +820,12 @@ class GameSession:
             pinfo.connected = True
             pinfo.disconnected_at = None
 
-            # Batalkan grace timer
             timer = self._reconnect_timers.pop(player_id, None)
             if timer:
                 timer.cancel()
 
         logger.info(f"ROOM {self.room_code} | RECONNECT player={player_id}")
 
-        # Kirim snapshot ke pemain
         with self._lock:
             if self._engine:
                 snapshot = self._engine.get_reconnect_snapshot(player_id)
@@ -1005,21 +836,15 @@ class GameSession:
                 current = None
                 waiting_initial = False
 
-            # Snapshot reconnect harus membawa roster lengkap supaya client
-            # tidak menampilkan Pxxx sebagai nama pemain setelah reconnect.
             snapshot["players"] = self._player_list_snapshot()
 
-            # Kirim sisa waktu giliran agar countdown di client sinkron
             if getattr(self, "_turn_deadline", None):
                 snapshot["turn_remaining"] = max(0, self._turn_deadline - time.time())
-                
-            # FIX: Beri tahu client jika sedang berada di layar akhir ronde
+
             snapshot["session_state"] = self.state
             if self.state == "WAITING_READY":
                 snapshot["round_result"] = getattr(self, "_last_round_result", None)
 
-            # Kirim status giliran yang benar agar client tidak menyimpan
-            # aksi discard/take yang sudah kedaluwarsa saat reconnect.
             if current == player_id and self.state in ("PLAYER_TURN", "LAST_TURN_PHASE"):
                 snapshot["valid_actions"] = (["DISCARD"] if waiting_initial
                                              else ["TAKE_DECK", "TAKE_DISCARD", "KNOCK"])
@@ -1039,17 +864,15 @@ class GameSession:
             },
         })
 
-        # Kirim hand terkini (private)
         with self._lock:
             if self._engine:
                 pstate = self._engine.get_state_for_player(player_id)
                 _send_to(new_sock, {
                     "type": "YOUR_HAND",
-                    # [FIX #1 — Person C] key engine = 'your_hand'
+
                     "payload": {"cards": pstate.get("your_hand", [])},
                 })
 
-        # Broadcast ke semua bahwa pemain kembali
         self._broadcast({
             "type": "PLAYER_RECONNECTED",
             "payload": {
@@ -1057,11 +880,9 @@ class GameSession:
                 "username": pinfo.username,
             },
         })
-
         return True, ""
 
     def _on_reconnect_timeout(self, player_id: str):
-        """Pemain tidak reconnect dalam batas waktu → hapus dari ronde aktif."""
         with self._lock:
             pinfo = self._players.get(player_id)
             if pinfo is None or pinfo.connected:
@@ -1078,48 +899,26 @@ class GameSession:
             },
         })
 
-        # Hapus dari game engine jika memungkinkan
-        # (bergantung interface Person A — skip jika tidak ada metode remove)
-
-
-# ---------------------------------------------------------------------------
-# RoomManager — registry semua room, entry point untuk server.py
-# ---------------------------------------------------------------------------
 class RoomManager:
-    """
-    Mengelola semua room (GameSession) yang aktif.
-
-    - Buat room baru saat pemain pertama login tanpa room_code
-    - Route koneksi masuk ke room yang tepat via room_code
-    - Registry player_id → room_code untuk validasi reconnect
-    """
-
     def __init__(self):
-        self._sessions: dict[str, GameSession] = {}   # room_code → GameSession
-        self._player_room: dict[str, str] = {}         # player_id → room_code
-        self._player_names: dict[str, str] = {}        # player_id → username
+        self._sessions: dict[str, GameSession] = {}
+        self._player_room: dict[str, str] = {}
+        self._player_names: dict[str, str] = {}
         self._lock = threading.Lock()
 
-    # ======================================================================
+
     def register_player(
         self,
         username: str,
         room_code: Optional[str],
         sock: socket.socket,
     ) -> tuple[str, str, Optional[str]]:
-        """
-        Daftarkan pemain ke room.
-        - room_code=None → buat room baru
-        - room_code=X    → gabung room X
-
-        Return: (player_id, room_code, error_or_None)
-        """
         with self._lock:
-            # Generate player_id unik
+
             player_id = _new_player_id(set(self._player_room.keys()))
 
             if room_code is None:
-                # Buat room baru
+
                 new_code = _new_room_code(set(self._sessions.keys()))
                 session = GameSession(new_code)
                 self._sessions[new_code] = session
@@ -1133,7 +932,7 @@ class RoomManager:
             self._player_room[player_id] = room_code
             self._player_names[player_id] = username
 
-        # Tambahkan ke session (di luar lock agar tidak deadlock)
+
         err = session.add_player(player_id, username, sock)
         if err:
             with self._lock:
@@ -1143,16 +942,13 @@ class RoomManager:
 
         return player_id, room_code, None
 
-    # ======================================================================
+
     def reconnect_player(
         self,
         player_id: str,
         room_code: str,
         new_sock: socket.socket,
     ) -> tuple[bool, str]:
-        """
-        Validasi identitas dan delegasi ke GameSession.reconnect_player.
-        """
         with self._lock:
             stored_room = self._player_room.get(player_id)
 
@@ -1167,7 +963,7 @@ class RoomManager:
 
         return session.reconnect_player(player_id, new_sock)
 
-    # ======================================================================
+
     def get_session(self, room_code: str) -> Optional[GameSession]:
         with self._lock:
             return self._sessions.get(room_code)

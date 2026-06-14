@@ -1,15 +1,3 @@
-# =============================================================================
-# client.py — Game Kartu 41 client
-# Person C: koneksi TCP, receiver thread, state store, dispatcher, main loop.
-#
-# Jalankan GUI      : python client.py [--host H] [--name ali] [--room CODE]
-# Jalankan headless : python client.py --headless --name ali [--room CODE]
-#
-# PENTING: client bicara dialek SERVER (server.py / session.py), bukan
-# protocol.encode_action() — server menolak type 'ACTION'. protocol.encode()
-# / decode() dipakai untuk framing saja (satu JSON per baris).
-# =============================================================================
-
 import argparse
 import json
 import os
@@ -20,25 +8,18 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-
-from protocol import encode
+from shared.protocol import encode
 from shared.constants import (
     DEFAULT_PORT,
     PING_INTERVAL_SEC,
     RECONNECT_WINDOW_SEC,
 )
 
-# Timeout giliran 30 s ada di session.py (TURN_TIMEOUT_SECONDS) — server tidak
-# mengirim deadline eksplisit, jadi client menghitung countdown sendiri.
 TURN_TIMEOUT_SEC = 30
 RECONNECT_RETRY_SEC = 3
 TOAST_SECONDS = 4.0
 SESSION_FILE = os.path.expanduser("~/.kartu41_session.json")
-
-# Sentinel internal: receiver thread memasukkan ini ke inbox saat socket putus.
 NET_DOWN = "__NET_DOWN__"
-
-# Fase UI (string polos supaya renderer/input_handler tidak perlu import client)
 PHASE_CONNECT = "CONNECT"
 PHASE_LOBBY = "LOBBY"
 PHASE_PLAYING = "PLAYING"
@@ -53,18 +34,7 @@ IN_GAME_PHASES = {
     PHASE_WAITING_READY, PHASE_LOBBY,
 }
 
-
-# =============================================================================
-# Framing: potong stream byte menjadi pesan JSON per baris
-# =============================================================================
-
 class LineFramer:
-    """Buffer incremental: terima potongan bytes, keluarkan list pesan utuh.
-
-    Menangani partial recv (baris terpotong di tengah) dan beberapa pesan
-    dalam satu chunk. Baris yang bukan JSON valid di-skip, bukan crash.
-    """
-
     def __init__(self):
         self._buf = b""
 
@@ -84,16 +54,7 @@ class LineFramer:
                 messages.append(msg)
         return messages
 
-
-# =============================================================================
-# NetworkClient — socket TCP + receiver daemon thread
-# =============================================================================
-
 class NetworkClient:
-    """Kirim/terima pesan line-framed JSON. Pesan masuk didorong ke
-    self.inbox (queue.Queue); thread UI men-drain queue tiap frame dan tidak
-    pernah menyentuh socket untuk membaca."""
-
     def __init__(self, host: str, port: int = DEFAULT_PORT):
         self.host = host
         self.port = port
@@ -101,17 +62,9 @@ class NetworkClient:
         self.connected = False
         self._sock: socket.socket | None = None
         self._send_lock = threading.Lock()
-        # Nomor generasi: receiver thread lama berhenti mengirim sentinel
-        # setelah socket diganti saat reconnect.
         self._gen = 0
 
     def connect(self, first_message: tuple | None = None):
-        """Buka socket baru dan mulai receiver thread.
-
-        first_message=(type, payload) dikirim sebelum receiver jalan —
-        dipakai untuk RECONNECT yang harus jadi pesan pertama di socket baru.
-        Raise OSError jika gagal konek.
-        """
         self.close()
         sock = socket.create_connection((self.host, self.port), timeout=10)
         sock.settimeout(None)
@@ -143,14 +96,12 @@ class NetworkClient:
 
     def close(self):
         with self._send_lock:
-            self._gen += 1  # invalidasi receiver lama
+            self._gen += 1
             sock = self._sock
             self._sock = None
         self.connected = False
         if sock is not None:
             try:
-                # shutdown membangunkan receiver thread yang sedang blok di
-                # recv(); close() saja bisa membiarkannya menggantung.
                 sock.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
@@ -159,7 +110,6 @@ class NetworkClient:
             except OSError:
                 pass
 
-    # ------------------------------------------------------------------
     def _recv_loop(self, sock: socket.socket, gen: int):
         framer = LineFramer()
         try:
@@ -171,18 +121,12 @@ class NetworkClient:
                     self.inbox.put(msg)
         except OSError:
             pass
-        # Hanya receiver generasi terbaru yang boleh melapor putus —
-        # kalau tidak, reconnect sukses bisa langsung "diputus" thread lama.
+
         with self._send_lock:
             still_current = (gen == self._gen)
         if still_current:
             self.connected = False
             self.inbox.put({"type": NET_DOWN, "payload": {}})
-
-
-# =============================================================================
-# ClientState — single source of truth yang digambar renderer
-# =============================================================================
 
 @dataclass
 class ClientState:
@@ -192,11 +136,11 @@ class ClientState:
     room_code: str = ""
     host: str = "127.0.0.1"
 
-    hand: list = field(default_factory=list)          # [{suit, rank}, ...]
+    hand: list = field(default_factory=list)
     discard_top: dict | None = None
     deck_count: int = 0
     round_number: int = 0
-    players: list = field(default_factory=list)       # [{player_id, username, lives, hand_count, connected}]
+    players: list = field(default_factory=list)
     current_turn: str = ""
     valid_actions: list = field(default_factory=list)
     turn_deadline: float | None = None
@@ -204,20 +148,19 @@ class ClientState:
     round_result: dict | None = None
     game_over_info: dict | None = None
 
-    chat_log: list = field(default_factory=list)      # [{username, text}]
-    toasts: list = field(default_factory=list)        # [{text, until}]
+    chat_log: list = field(default_factory=list)
+    toasts: list = field(default_factory=list)
     latency_ms: int | None = None
     last_ping_sent: float | None = None
 
-    speaking: dict = field(default_factory=dict)      # player_id → expiry ts
+    speaking: dict = field(default_factory=dict)
     reconnect_deadline: float | None = None
-    ui: dict = field(default_factory=dict)            # state widget GUI (input text, fokus, hitbox)
+    ui: dict = field(default_factory=dict)
 
-    # ------------------------------------------------------------------
     def toast(self, text: str, now: float | None = None):
         now = time.time() if now is None else now
         self.toasts.append({"text": str(text), "until": now + TOAST_SECONDS})
-        del self.toasts[:-6]  # simpan maksimal 6
+        del self.toasts[:-6]
 
     def active_toasts(self, now: float | None = None) -> list:
         now = time.time() if now is None else now
@@ -244,13 +187,7 @@ class ClientState:
         except OSError:
             pass
 
-# =============================================================================
-# Persistensi sesi (untuk reconnect setelah client restart)
-# =============================================================================
-
 def _session_file_for(host: str, username: str | None = None) -> str:
-    # File sesi dulu global per machine, jadi satu client bisa menimpa
-    # reconnect target client lain. Kunci file per host + username.
     parts = [host or "localhost"]
     if username:
         parts.append(username)
@@ -260,7 +197,6 @@ def _session_file_for(host: str, username: str | None = None) -> str:
     return os.path.expanduser(f"~/.kartu41_session_{key}.json")
 
 def save_session(state: ClientState):
-    # Simpan state reconnect untuk identitas pemain ini saja.
     session_file = _session_file_for(state.host, state.username)
     try:
         with open(session_file, "w", encoding="utf-8") as f:
@@ -274,7 +210,6 @@ def save_session(state: ClientState):
         pass
 
 def clear_session(host: str, username: str | None = None):
-    """Menghapus file sesi dari disk agar tidak muncul tombol reconnect."""
     session_file = _session_file_for(host, username)
     try:
         if os.path.exists(session_file):
@@ -283,14 +218,11 @@ def clear_session(host: str, username: str | None = None):
         pass
 
 def load_session(host: str, username: str = "") -> dict | None:
-    # Prioritaskan file sesi yang cocok dengan username sekarang; fallback
-    # legacy hanya dipakai jika username belum diketahui.
     candidates = [_session_file_for(host, username)]
     if not username:
         legacy = os.path.expanduser("~/.kartu41_session.json")
         if legacy not in candidates:
             candidates.append(legacy)
-
     for path in candidates:
         try:
             with open(path, encoding="utf-8") as f:
@@ -301,20 +233,12 @@ def load_session(host: str, username: str = "") -> dict | None:
             continue
     return None
 
-
-# =============================================================================
-# Dispatcher — satu handler per tipe pesan server (tabel §0 CLIENT_PLAN.md)
-# =============================================================================
-
 def _first(payload: dict, *keys, default=None):
-    """Ambil nilai non-None pertama — defensif terhadap field server yang
-    masih salah eja (mis. current_turn vs current_player, Blockers §7)."""
     for k in keys:
         v = payload.get(k)
         if v is not None:
             return v
     return default
-
 
 def _on_login_ack(state, p, now):
     state.player_id = p.get("player_id") or state.player_id
@@ -322,14 +246,10 @@ def _on_login_ack(state, p, now):
     state.phase = PHASE_LOBBY
     state.toast(p.get("message", "Bergabung ke room"), now)
     clear_session(state.host, state.username) 
-    
-    # FIX 3: Lepas fokus saat berhasil masuk Lobby agar tombol V bisa berfungsi
     state.ui["focus"] = None
-
 
 def _on_error(state, p, now):
     state.toast(p.get("message", "Error dari server"), now)
-
 
 def _on_player_joined(state, p, now):
     players = p.get("players")
@@ -339,29 +259,20 @@ def _on_player_joined(state, p, now):
         state.room_code = p["room_code"]
     if p.get("username") and p.get("player_id") != state.player_id:
         state.toast(f"{p['username']} bergabung", now)
-    
-    # FIX NOMOR 4: Reset status tombol ready lokal menjadi tidak ready saat ada pemain masuk
-    # Langkah ini menyinkronkan UI client dengan logika pembatalan ready yang ada di server
     state.ui["ready_sent"] = False
-
 
 def _on_game_start(state, p, now):
     state.phase = PHASE_PLAYING
     state.round_result = None
-    # Reset ready flags sehingga tombol SIAP muncul kembali di ronde berikutnya
     state.ui["ready_sent"] = False
     state.ui["next_ready_sent"] = False
     state.toast(p.get("message", "Permainan dimulai!"), now)
-    
-    # FIX: Simpan riwayat sesi HANYA KETIKA game resmi dimulai
     save_session(state)
-
 
 def _on_your_hand(state, p, now):
     cards = p.get("cards")
     if isinstance(cards, list):
         state.hand = [c for c in cards if isinstance(c, dict)]
-
 
 def _on_game_state(state, p, now):
     state.current_turn = _first(p, "current_turn", "current_player",
@@ -378,17 +289,14 @@ def _on_game_state(state, p, now):
     players = p.get("players")
     if isinstance(players, list) and players:
         state.players = players
-    # GAME_STATE adalah snapshot authoritative; kalau ternyata bukan giliran
-    # kita, buang aksi lama supaya UI tidak minta discard dari turn sebelumnya.
+
     if state.current_turn != state.player_id:
         state.valid_actions = []
         if state.phase == PHASE_MUST_DISCARD:
             state.phase = PHASE_PLAYING
-    # Reconnect/late-join: kalau masih di lobby tapi sudah ada GAME_STATE,
-    # game jelas sedang berjalan.
+
     if state.phase == PHASE_LOBBY:
         state.phase = PHASE_PLAYING
-
 
 def _on_turn_indicator(state, p, now):
     state.current_turn = p.get("current_turn") or state.current_turn
@@ -398,35 +306,24 @@ def _on_turn_indicator(state, p, now):
     if state.phase in (PHASE_ROUND_END, PHASE_WAITING_READY):
         state.phase = PHASE_PLAYING
         state.round_result = None
-        # Ronde baru dimulai → tombol SIAP harus muncul lagi
-        state.ui["next_ready_sent"] = False
 
+        state.ui["next_ready_sent"] = False
 
 def _on_valid_actions(state, p, now):
     actions = p.get("actions")
     state.valid_actions = actions if isinstance(actions, list) else []
-    
-    # FIX: Hapus/comment baris ini agar animasi countdown tidak ter-reset
-    # ke 30 detik setiap kali pemain selesai mengambil kartu!
-    # state.turn_deadline = now + TURN_TIMEOUT_SEC  <--- HAPUS BARIS INI
-    
     if state.valid_actions == ["DISCARD"]:
         state.phase = PHASE_MUST_DISCARD
     elif state.phase == PHASE_MUST_DISCARD:
         state.phase = PHASE_PLAYING
 
-
 def _on_card_drawn(state, p, now):
-    # Server mengirim YOUR_HAND segera setelah CARD_DRAWN (session.py:504-507),
-    # jadi jangan mutasi hand di sini — cukup notifikasi.
     card = p.get("card")
     if isinstance(card, dict) and card.get("rank"):
         state.toast(f"Ambil kartu dari {p.get('source', '?')}", now)
 
-
 def _on_knock_notification(state, p, now):
     state.toast(p.get("message") or f"{p.get('username', '?')} KNOCK!", now)
-
 
 def _on_round_end(state, p, now):
     state.round_result = p
@@ -434,49 +331,39 @@ def _on_round_end(state, p, now):
     state.valid_actions = []
     state.turn_deadline = None
 
-
 def _on_next_round_prompt(state, p, now):
     state.phase = PHASE_WAITING_READY
     state.toast(p.get("message", "Siap untuk ronde berikutnya?"), now)
-
 
 def _on_game_over(state, p, now):
     state.game_over_info = p
     state.phase = PHASE_GAME_OVER
     state.valid_actions = []
     state.turn_deadline = None
-    
-    # FIX: Hapus riwayat karena permainan sudah usai sepenuhnya
     clear_session(state.host, state.username)
-
 
 def _set_player_connected(state, player_id, connected):
     for pl in state.players:
         if pl.get("player_id") == player_id:
             pl["connected"] = connected
 
-
 def _on_player_disconnected(state, p, now):
     _set_player_connected(state, p.get("player_id"), False)
     state.toast(p.get("message") or f"{p.get('username', '?')} terputus", now)
-
 
 def _on_player_reconnected(state, p, now):
     _set_player_connected(state, p.get("player_id"), True)
     state.toast(f"{p.get('username', '?')} tersambung kembali", now)
 
-
 def _on_player_eliminated_disconnect(state, p, now):
     _set_player_connected(state, p.get("player_id"), False)
     state.toast(f"{p.get('username', '?')} dieliminasi (tidak reconnect)", now)
-
 
 def _on_reconnect_ack(state, p, now):
     state.player_id = p.get("player_id") or state.player_id
     snap = p.get("state") or {}
     if not isinstance(snap, dict):
         snap = {}
-
     hand = snap.get("your_hand")
     if isinstance(hand, list):
         state.hand = [c for c in hand if isinstance(c, dict)]
@@ -490,8 +377,6 @@ def _on_reconnect_ack(state, p, now):
     rnd = snap.get("round")
     if isinstance(rnd, int):
         state.round_number = rnd
-
-    # Bangun ulang daftar pemain dari snapshot jika kosong
     lives = snap.get("lives") or {}
     order = snap.get("player_order") or []
     players = snap.get("players")
@@ -505,9 +390,6 @@ def _on_reconnect_ack(state, p, now):
              "hand_count": None, "connected": True}
             for pid in order
         ]
-
-    # FIX 1A: Selalu sinkronkan nyawa dan kartu lawan, karena array "players" 
-    # bawaan dari lobby server tidak membawa info nyawa In-Game.
     for pl in state.players:
         pid = pl.get("player_id")
         if pid in lives:
@@ -518,13 +400,11 @@ def _on_reconnect_ack(state, p, now):
     actions = snap.get("valid_actions")
     if isinstance(actions, list):
         state.valid_actions = actions
-    
-    # Setel ulang Phase
+
     actions = snap.get("valid_actions")
     if isinstance(actions, list):
         state.valid_actions = actions
-    
-    # FIX: Setel ulang Phase dengan memprioritaskan status dari server
+
     session_state = snap.get("session_state")
     
     if session_state == "WAITING_READY":
@@ -535,26 +415,18 @@ def _on_reconnect_ack(state, p, now):
     else:
         state.phase = PHASE_PLAYING if snap else PHASE_LOBBY
 
-    # FIX: Baca sisa waktu (turn_remaining) kiriman server
     rem = snap.get("turn_remaining")
     if rem is not None:
         state.turn_deadline = now + rem
     else:
         state.turn_deadline = None
-
     state.reconnect_deadline = None
     state.toast(p.get("message", "Berhasil reconnect"), now)
-    
-    # FIX 4: Lepas fokus saat berhasil Reconnect
     state.ui["focus"] = None
 
-
 def _on_pong(state, p, now):
-    # session.py:448 membalas dengan time.time() milik SERVER, bukan echo —
-    # jadi hitung RTT dari waktu kirim PING kita sendiri.
     if state.last_ping_sent is not None:
         state.latency_ms = max(0, int((now - state.last_ping_sent) * 1000))
-
 
 def _on_chat_broadcast(state, p, now):
     state.chat_log.append({
@@ -562,7 +434,6 @@ def _on_chat_broadcast(state, p, now):
         "text": str(p.get("text", "")),
     })
     del state.chat_log[:-100]
-
 
 _HANDLERS = {
     "LOGIN_ACK": _on_login_ack,
@@ -586,9 +457,7 @@ _HANDLERS = {
     "CHAT_BROADCAST": _on_chat_broadcast,
 }
 
-
 def dispatch(state: ClientState, msg: dict, now: float | None = None):
-    """Terapkan satu pesan server ke ClientState. Tipe tak dikenal di-skip."""
     now = time.time() if now is None else now
     if not isinstance(msg, dict):
         return
@@ -598,11 +467,6 @@ def dispatch(state: ClientState, msg: dict, now: float | None = None):
     handler = _HANDLERS.get(msg.get("type", ""))
     if handler is not None:
         handler(state, payload, now)
-
-
-# =============================================================================
-# Ping loop + reconnect controller
-# =============================================================================
 
 def start_ping_loop(net: NetworkClient, state: ClientState,
                     stop: threading.Event):
@@ -614,12 +478,7 @@ def start_ping_loop(net: NetworkClient, state: ClientState,
             stop.wait(PING_INTERVAL_SEC)
     threading.Thread(target=loop, daemon=True, name="ping").start()
 
-
 class ReconnectController:
-    """Saat socket putus di tengah game: fase RECONNECTING, coba socket baru
-    tiap 3 s sampai grace 60 s habis. Pesan pertama di socket baru harus
-    RECONNECT {player_id, room_code} (server.py:166)."""
-
     def __init__(self, net: NetworkClient, state: ClientState):
         self.net = net
         self.state = state
@@ -638,7 +497,7 @@ class ReconnectController:
             st.phase = PHASE_RECONNECTING
             st.reconnect_deadline = now + RECONNECT_WINDOW_SEC
             st.toast("Koneksi putus — mencoba reconnect...", now)
-        self._next_try = now  # coba segera
+        self._next_try = now
 
     def tick(self, now: float):
         st = self.state
@@ -668,15 +527,8 @@ class ReconnectController:
             self._next_try = time.time() + RECONNECT_RETRY_SEC
             self._attempting = False
 
-
-# =============================================================================
-# Mode headless — harness uji integrasi tanpa GUI
-# =============================================================================
-
 _HEADLESS_HELP = """\
-Perintah: ready | take d | take p | discard <i> | knock | next |
-          chat <teks> | hand | state | help | quit"""
-
+Perintah: ready | take d | take p | discard <i> | knock | next | chat <teks> | hand | state | help | quit"""
 
 def _print_state_summary(state: ClientState):
     me = " (GILIRANKU)" if state.is_my_turn() else ""
@@ -691,10 +543,7 @@ def _print_state_summary(state: ClientState):
         print(f"    - {p.get('username')} lives={p.get('lives')} "
               f"kartu={p.get('hand_count')}{flag}")
 
-
-def _handle_headless_command(line: str, state: ClientState,
-                             net: NetworkClient) -> bool:
-    """Return False untuk keluar."""
+def _handle_headless_command(line: str, state: ClientState, net: NetworkClient) -> bool:
     parts = line.strip().split()
     if not parts:
         return True
@@ -717,8 +566,7 @@ def _handle_headless_command(line: str, state: ClientState,
         except (ValueError, IndexError):
             print(f"!! indeks kartu tidak valid (hand: {len(state.hand)} kartu)")
             return True
-        net.send("DISCARD", {"card": {"suit": card.get("suit"),
-                                      "rank": card.get("rank")}})
+        net.send("DISCARD", {"card": {"suit": card.get("suit"), "rank": card.get("rank")}})
     elif cmd == "knock":
         net.send("KNOCK", {})
     elif cmd == "next":
@@ -733,7 +581,6 @@ def _handle_headless_command(line: str, state: ClientState,
     else:
         print(f"!! perintah tidak dikenal: {cmd}  (ketik 'help')")
     return True
-
 
 def run_headless(args):
     if not args.name:
@@ -750,9 +597,7 @@ def run_headless(args):
     except OSError as e:
         print(f"[NET] gagal konek: {e}", file=sys.stderr)
         sys.exit(1)
-    net.send("LOGIN", {"username": args.name,
-                       "room_code": (args.room or "").upper()})
-
+    net.send("LOGIN", {"username": args.name, "room_code": (args.room or "").upper()})
     stop = threading.Event()
     start_ping_loop(net, state, stop)
 
@@ -771,7 +616,6 @@ def run_headless(args):
     try:
         while running:
             now = time.time()
-            # Drain pesan jaringan
             try:
                 while True:
                     msg = net.inbox.get_nowait()
@@ -784,15 +628,12 @@ def run_headless(args):
                         dispatch(state, msg, now)
             except queue.Empty:
                 pass
-
             if state.phase != prev_phase:
                 print(f"[STATE] {prev_phase} -> {state.phase}")
                 _print_state_summary(state)
                 prev_phase = state.phase
 
             recon.tick(now)
-
-            # Perintah dari stdin
             try:
                 line = cmd_q.get(timeout=0.1)
                 running = _handle_headless_command(line, state, net)
@@ -803,24 +644,14 @@ def run_headless(args):
         net.close()
     print("[NET] keluar.")
 
-
-# =============================================================================
-# Mode GUI — Pygame
-# =============================================================================
-
 def run_gui(args):
     import pygame
-
-    import input_handler
-    import renderer
-
+    import client.input_handler as input_handler
+    import client.renderer as renderer
     try:
-        from voice import VoiceChat
+        from client.voice import VoiceChat
     except Exception:
         VoiceChat = None
-
-    # Pakai session file yang cocok agar dua client di satu laptop tidak
-    # saling menimpa reconnect identity.
     saved = load_session(args.host, args.name or "") or {}
     state = ClientState(host=args.host)
     state.ui["username_input"] = args.name or saved.get("username", "")
@@ -844,8 +675,6 @@ def run_gui(args):
     try:
         while running:
             now = time.time()
-
-            # 1. Drain network queue → dispatcher
             try:
                 while True:
                     msg = net.inbox.get_nowait()
@@ -855,9 +684,6 @@ def run_gui(args):
                         dispatch(state, msg, now)
             except queue.Empty:
                 pass
-
-            # 2. Voice: mulai setelah LOGIN_ACK (butuh player_id + room_code).
-            #    Keepalive pertama meregistrasikan alamat UDP kita di relay.
             if (voice is None and VoiceChat is not None
                     and state.player_id and state.room_code):
                 voice = VoiceChat(args.host, state.player_id,
@@ -866,14 +692,11 @@ def run_gui(args):
                 if not voice.audio_ok:
                     state.toast("Voice chat nonaktif (audio tidak tersedia)", now)
 
-            # 3. Input → aksi protokol
             running = input_handler.handle(pygame.event.get(), state, net, voice)
 
             if state.phase == "CONNECT" and voice is not None:
                 voice.close()
                 voice = None
-
-            # 4. Reconnect & gambar
             recon.tick(now)
             renderer.draw(screen, state, now)
             pygame.display.flip()
@@ -885,23 +708,18 @@ def run_gui(args):
         net.close()
         pygame.quit()
 
-
-# =============================================================================
 def main():
     ap = argparse.ArgumentParser(description="Client Game Kartu 41")
     ap.add_argument("--host", default="127.0.0.1", help="alamat server")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--name", default="", help="username")
     ap.add_argument("--room", default="", help="kode room (kosong = buat baru)")
-    ap.add_argument("--headless", action="store_true",
-                    help="mode teks tanpa GUI (harness uji integrasi)")
+    ap.add_argument("--headless", action="store_true", help="mode teks tanpa GUI (harness uji integrasi)")
     args = ap.parse_args()
-
     if args.headless:
         run_headless(args)
     else:
         run_gui(args)
-
 
 if __name__ == "__main__":
     main()

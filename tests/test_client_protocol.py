@@ -1,15 +1,6 @@
-# =============================================================================
-# tests/test_client_protocol.py
-# Unit test untuk framing (LineFramer) dan dispatcher client — murni,
-# tanpa server dan tanpa pygame.
-# Jalankan: python -m pytest tests/test_client_protocol.py -v
-#        atau: python tests/test_client_protocol.py
-# =============================================================================
-
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-
 import json
 import tempfile
 import unittest
@@ -23,20 +14,16 @@ from client import (
 
 NOW = 1_000_000.0
 
-
 def msg(mtype, payload=None):
     return {"type": mtype, "payload": payload if payload is not None else {}}
 
-
 class TestLineFramer(unittest.TestCase):
-
     def test_satu_pesan_utuh(self):
         f = LineFramer()
         out = f.feed(b'{"type": "PONG", "payload": {}}\n')
         self.assertEqual(out, [{"type": "PONG", "payload": {}}])
 
     def test_partial_recv_disambung(self):
-        """Baris terpotong di tengah chunk harus menunggu sisa byte-nya."""
         f = LineFramer()
         self.assertEqual(f.feed(b'{"type": "GAME_'), [])
         self.assertEqual(f.feed(b'START", "payload": {}}'), [])
@@ -77,11 +64,9 @@ class TestLineFramer(unittest.TestCase):
         out = f.feed(b'[1, 2, 3]\n"string"\n')
         self.assertEqual(out, [])
 
-
 class DispatcherTestBase(unittest.TestCase):
     def setUp(self):
         self.state = ClientState()
-        # save_session (dipanggil LOGIN_ACK) jangan menulis ke $HOME asli
         self._tmp = tempfile.NamedTemporaryFile(delete=False)
         self._orig_session_file = client.SESSION_FILE
         client.SESSION_FILE = self._tmp.name
@@ -92,14 +77,12 @@ class DispatcherTestBase(unittest.TestCase):
 
 
 class TestDispatcherLobby(DispatcherTestBase):
-
     def test_login_ack(self):
         dispatch(self.state, msg("LOGIN_ACK", {
             "player_id": "P001", "room_code": "ABCDE", "message": "ok"}), NOW)
         self.assertEqual(self.state.player_id, "P001")
         self.assertEqual(self.state.room_code, "ABCDE")
         self.assertEqual(self.state.phase, PHASE_LOBBY)
-        # sesi tersimpan untuk reconnect
         with open(client.SESSION_FILE) as f:
             saved = json.load(f)
         self.assertEqual(saved["player_id"], "P001")
@@ -124,9 +107,7 @@ class TestDispatcherLobby(DispatcherTestBase):
         dispatch(self.state, msg("ERROR", {"message": "Room penuh"}), NOW)
         self.assertIn("Room penuh", self.state.active_toasts(NOW))
 
-
 class TestDispatcherInGame(DispatcherTestBase):
-
     def setUp(self):
         super().setUp()
         self.state.player_id = "P001"
@@ -155,8 +136,6 @@ class TestDispatcherInGame(DispatcherTestBase):
         self.assertEqual(self.state.round_number, 2)
 
     def test_game_state_ejaan_engine(self):
-        """Blockers §7: server saat ini meneruskan key engine — client harus
-        membaca current_player / deck_remaining / top_discard juga."""
         dispatch(self.state, msg("GAME_STATE", {
             "current_player": "P002", "deck_remaining": 25,
             "top_discard": {"suit": "hearts", "rank": "K"}}), NOW)
@@ -203,8 +182,6 @@ class TestDispatcherInGame(DispatcherTestBase):
         self.assertEqual(self.state.phase, PHASE_PLAYING)
 
     def test_card_drawn_tidak_mengubah_hand(self):
-        """Server mengirim YOUR_HAND setelah CARD_DRAWN — hand jangan
-        dimutasi dua kali."""
         self.state.hand = [{"suit": "clubs", "rank": "2"}]
         dispatch(self.state, msg("CARD_DRAWN", {
             "source": "deck", "card": {"suit": "hearts", "rank": "A"}}), NOW)
@@ -242,8 +219,6 @@ class TestDispatcherInGame(DispatcherTestBase):
         self.assertTrue(self.state.players[1]["connected"])
 
     def test_pong_menghitung_latensi_dari_waktu_kirim(self):
-        # session.py:448 membalas timestamp milik server, bukan echo —
-        # latensi dihitung dari last_ping_sent client sendiri.
         self.state.last_ping_sent = NOW - 0.05
         dispatch(self.state, msg("PONG", {"timestamp": 12345.0}), NOW)
         self.assertEqual(self.state.latency_ms, 50)
@@ -251,12 +226,9 @@ class TestDispatcherInGame(DispatcherTestBase):
     def test_chat_broadcast(self):
         dispatch(self.state, msg("CHAT_BROADCAST", {
             "player_id": "P002", "username": "budi", "text": "halo!"}), NOW)
-        self.assertEqual(self.state.chat_log[-1],
-                         {"username": "budi", "text": "halo!"})
-
+        self.assertEqual(self.state.chat_log[-1], {"username": "budi", "text": "halo!"})
 
 class TestDispatcherReconnect(DispatcherTestBase):
-
     def test_reconnect_ack_membangun_ulang_state(self):
         self.state.phase = "RECONNECTING"
         self.state.reconnect_deadline = NOW + 30
@@ -277,20 +249,16 @@ class TestDispatcherReconnect(DispatcherTestBase):
         self.assertEqual(self.state.deck_count, 17)
         self.assertEqual(self.state.current_turn, "P002")
         self.assertIsNone(self.state.reconnect_deadline)
-        # daftar pemain dibangun dari player_order + lives
         self.assertEqual([p["player_id"] for p in self.state.players],
                          ["P001", "P002"])
         self.assertEqual(self.state.players[1]["lives"], 1)
 
     def test_reconnect_ack_snapshot_kosong_kembali_ke_lobby(self):
-        """Game belum mulai (engine None) → snapshot {} → kembali ke lobby."""
         dispatch(self.state, msg("RECONNECT_ACK", {
             "player_id": "P001", "state": {}, "message": "ok"}), NOW)
         self.assertEqual(self.state.phase, PHASE_LOBBY)
 
-
 class TestDispatcherDefensive(DispatcherTestBase):
-
     def test_tipe_tak_dikenal_diabaikan(self):
         dispatch(self.state, msg("HALUSINASI_XYZ", {"a": 1}), NOW)
         self.assertEqual(self.state.phase, PHASE_CONNECT)
@@ -310,7 +278,6 @@ class TestDispatcherDefensive(DispatcherTestBase):
         self.state.hand = [{"suit": "clubs", "rank": "2"}]
         dispatch(self.state, msg("YOUR_HAND", {"cards": None}), NOW)
         self.assertEqual(len(self.state.hand), 1)  # tidak tertimpa None
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

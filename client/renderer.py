@@ -5,7 +5,7 @@ from shared.constants import SUIT_SYMBOLS
 
 WIDTH, HEIGHT = 1280, 720
 
-ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets")
 CARD_DIR = os.path.join(ASSET_DIR, "cards")
 FONT_PATH = os.path.join(ASSET_DIR, "fonts", "Kenney Pixel.ttf")
 CARD_W, CARD_H = 64, 64
@@ -271,10 +271,8 @@ def _draw_lobby(screen, state, now):
 
     ready_sent = state.ui.get("ready_sent")
 
-    # Tampilkan tombol READY hanya jika ada 2 pemain atau lebih
     if len(players) >= 2:
         if ready_sent:
-            # Teks dipindah ke ATAS tombol agar tidak tumpang tindih
             _text(screen, a.font_body, "Menunggu pemain lain...", GREY, center=(WIDTH // 2, 530))
             _button(screen, state, "unready_btn",
                     pygame.Rect(WIDTH // 2 - 100, 560, 200, 52),
@@ -291,13 +289,10 @@ def _draw_lobby(screen, state, now):
     _text(screen, a.font_small, "Game dimulai setelah minimal 2 pemain READY",
           DIM_GREY, center=(WIDTH // 2, HEIGHT - 16))
 
-
-# =============================================================================
-# Layar TABLE (PLAYING / MUST_DISCARD + dasar untuk overlay)
-# =============================================================================
+# Layar GAME --
 
 CHAT_W = 280
-TABLE_CX = (WIDTH - CHAT_W) // 2  # pusat area meja (kanan dipakai chat)
+TABLE_CX = (WIDTH - CHAT_W) // 2
 
 
 def _draw_opponent_panel(screen, state, p, rect, now):
@@ -313,13 +308,11 @@ def _draw_opponent_panel(screen, state, p, rect, now):
     _text(screen, a.font_body, p.get("username", "?"), name_color,
           topleft=(rect.x + 12, rect.y + 8))
 
-    # Nyawa sebagai deretan ♥
     lives = p.get("lives")
     hearts = "♥" * lives if isinstance(lives, int) else "?"
     _text(screen, a.font_symbol, hearts, RED if connected else DIM_GREY,
           topleft=(rect.x + 12, rect.y + 34))
 
-    # Kipas kartu tertutup sesuai hand_count
     count = p.get("hand_count")
     count = count if isinstance(count, int) else 0
     back = Assets.get().back()
@@ -332,8 +325,7 @@ def _draw_opponent_panel(screen, state, p, rect, now):
     if not connected:
         _text(screen, a.font_small, "TERPUTUS", RED,
               topleft=(rect.x + 12, rect.y + rect.h - 24))
-
-    # Indikator bicara (voice)
+        
     if state.speaking.get(p.get("player_id"), 0) > now:
         pygame.draw.circle(screen, GREEN, (rect.right - 16, rect.y + 16), 7)
 
@@ -353,7 +345,6 @@ def _draw_countdown(screen, state, now):
     Assets.get()
     _text(screen, Assets.get().font_small, f"{int(remaining)}s", WHITE,
           center=(bar.centerx, bar.y + 24))
-
 
 def _draw_chat(screen, state, now):
     a = Assets.get()
@@ -402,14 +393,11 @@ def _draw_chat(screen, state, now):
 
 def _draw_table(screen, state, now):
     a = Assets.get()
-
-    # HUD kiri-atas
     ping = f"{state.latency_ms} ms" if state.latency_ms is not None else "--"
     _text(screen, a.font_small,
           f"Room {state.room_code}   Ronde {state.round_number}   Ping {ping}",
           GREY, topleft=(16, 12))
 
-    # Nama pemain yang sedang giliran
     if state.current_turn:
         who = ("GILIRANMU!" if state.is_my_turn()
                else f"Giliran: {state.username_for(state.current_turn)}")
@@ -417,10 +405,8 @@ def _draw_table(screen, state, now):
               center=(TABLE_CX, 70))
     _draw_countdown(screen, state, now)
 
-    # Panel lawan (atas / sisi)
     others = [p for p in state.players if p.get("player_id") != state.player_id]
-    
-    # FIX 2: Lebarkan panel dari 230 menjadi 270 agar kartu kelima tidak meluber ke luar garis
+
     panel_w, panel_h = 270, 92 
     
     spots = [
@@ -431,11 +417,10 @@ def _draw_table(screen, state, now):
     for p, rect in zip(others, spots):
         _draw_opponent_panel(screen, state, p, rect, now)
 
-    # Tengah: deck + discard
     cy = 330
     deck_img = _scaled(a.back(), 2)
     deck_rect = deck_img.get_rect(center=(TABLE_CX - 90, cy + 40))
-    for off in (6, 3, 0):  # efek tumpukan
+    for off in (6, 3, 0):
         screen.blit(deck_img, (deck_rect.x - off, deck_rect.y - off))
     _hit(state, "deck", deck_rect.inflate(12, 12))
     _text(screen, a.font_small, f"Deck: {state.deck_count}", WHITE,
@@ -449,7 +434,6 @@ def _draw_table(screen, state, now):
     _text(screen, a.font_small, "Buangan", WHITE,
           center=(disc_rect.centerx, disc_rect.bottom + 18))
 
-    # Tombol aksi — aktif hanya jika ada di valid_actions
     actions = state.valid_actions or []
     bx, by, bw, bh, gap = TABLE_CX - 280, 470, 170, 44, 20
     _button(screen, state, "btn_take_deck",
@@ -466,7 +450,6 @@ def _draw_table(screen, state, now):
         _text(screen, a.font_body, "Pilih kartu untuk dibuang!", GOLD,
               center=(TABLE_CX, 545))
 
-    # Tangan sendiri, bawah-tengah, klikabel
     hand = state.hand
     if hand:
         scale = 2
@@ -476,33 +459,27 @@ def _draw_table(screen, state, now):
         x0 = TABLE_CX - total // 2
         mouse = pygame.mouse.get_pos()
         base_y = HEIGHT - cw - 20
-        
-        # FIX 2: Jangan aktifkan interaksi (hover/hitbox) jika tertutup overlay
         is_active = state.phase not in ("ROUND_END", "WAITING_READY", "GAME_OVER")
 
         for i, card in enumerate(hand):
             rect = pygame.Rect(x0 + i * spacing, base_y, cw, cw)
             hovered = is_active and rect.collidepoint(mouse)
             if hovered:
-                rect = rect.move(0, -16)  # hover lift
+                rect = rect.move(0, -16)
             img = _scaled(a.card(card), scale)
             if state.phase == "MUST_DISCARD" and hovered:
                 pygame.draw.rect(screen, GOLD, rect.inflate(8, 8), 3,
                                  border_radius=8)
             screen.blit(img, rect)
-            
-            # Hanya tambahkan ke hitbox jika area meja sedang aktif
             if is_active:
                 _hit(state, ("hand", i), rect)
 
-    # Info nyawa sendiri
     mine = next((p for p in state.players
                  if p.get("player_id") == state.player_id), None)
     if mine is not None and isinstance(mine.get("lives"), int):
         _text(screen, a.font_symbol_big, "♥" * mine["lives"], RED,
               topleft=(16, HEIGHT - 44))
 
-    # FIX 2: Indikator MIC menyala saat kamu menahan tombol 'V'
     if state.speaking.get(state.player_id, 0) > now:
         mic_box = pygame.Rect(16, HEIGHT - 76, 90, 24)
         pygame.draw.rect(screen, PANEL_LIGHT, mic_box, border_radius=4)
@@ -510,24 +487,20 @@ def _draw_table(screen, state, now):
         pygame.draw.circle(screen, GREEN, (mic_box.x + 12, mic_box.centery), 4)
         _text(screen, a.font_small, "MIC ON", GREEN, topleft=(mic_box.x + 24, mic_box.y + 5))
 
-    # In-game controls: quit + menu buttons (top-right corner, above chat panel)
     _button(screen, state, "ingame_quit_btn",
             pygame.Rect(WIDTH - CHAT_W - 195, 12, 80, 28),
             "QUIT", accent=RED)
     _button(screen, state, "ingame_menu_btn",
             pygame.Rect(WIDTH - CHAT_W - 95, 12, 80, 28),
             "MENU", accent=GREY)
-
-    # Small help note at bottom-left
+    
     _text(screen, a.font_small,
           "[V] bicara  [Enter] chat  MENU=kembali ke lobby  QUIT=keluar",
           DIM_GREY, topleft=(16, HEIGHT - 18))
 
     _draw_chat(screen, state, now)
 
-# =============================================================================
-# Overlay ROUND_END / WAITING_READY
-# =============================================================================
+# Layar ROUND END --
 
 def _draw_card_row(screen, cards, x, y):
     a = Assets.get()
@@ -607,9 +580,7 @@ def _draw_round_end(screen, state, now):
         _text(screen, a.font_small, "Menunggu server...", GREY,
               center=(panel.centerx, panel.bottom - 40))
 
-# =============================================================================
-# Layar GAME_OVER
-# =============================================================================
+# Layar GAME OVER --
 
 def _draw_game_over(screen, state, now):
     a = Assets.get()
@@ -624,7 +595,6 @@ def _draw_game_over(screen, state, now):
         _text(screen, a.font_body, info["message"], WHITE,
               center=(WIDTH // 2, 320))
 
-    # Tabel nyawa terakhir dari hasil ronde final
     lives = (state.round_result or {}).get("lives") or {}
     y = 390
     for pid, lv in lives.items():
@@ -639,11 +609,6 @@ def _draw_game_over(screen, state, now):
     _button(screen, state, "game_over_quit_btn",
             pygame.Rect(WIDTH // 2 + 30, HEIGHT - 110, 170, 48), "QUIT GAME", accent=RED)
 
-
-# =============================================================================
-# Overlay RECONNECTING
-# =============================================================================
-
 def _draw_reconnecting(screen, state, now):
     a = Assets.get()
     shade = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
@@ -651,7 +616,6 @@ def _draw_reconnecting(screen, state, now):
     screen.blit(shade, (0, 0))
 
     cx, cy = WIDTH // 2, HEIGHT // 2
-    # Spinner: busur berputar
     angle = (now * 4) % (2 * math.pi)
     pygame.draw.arc(screen, GOLD, pygame.Rect(cx - 36, cy - 96, 72, 72),
                     angle, angle + 4.2, 5)
@@ -660,11 +624,6 @@ def _draw_reconnecting(screen, state, now):
         remaining = max(0, int(state.reconnect_deadline - now))
         _text(screen, a.font_body, f"sisa waktu: {remaining}s", GREY,
               center=(cx, cy + 64))
-
-
-# =============================================================================
-# Entry point
-# =============================================================================
 
 def draw(screen, state, now):
     state.ui["hitboxes"] = {}
