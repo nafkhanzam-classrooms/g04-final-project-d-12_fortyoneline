@@ -1,38 +1,3 @@
-"""
-session.py — Game Kartu 41
-Person B: Lobby, Room Manager, Turn Manager, Broadcast, Reconnect
-
-Tanggung jawab:
-  - RoomManager : membuat room, registry semua room, route koneksi masuk
-  - GameSession  : state satu room (lobby → matchmaking → ronde → game over)
-                   turn manager, broadcast, private send, knock resolution,
-                   reconnect & disconnect handling, ready-next-round gate
-
-Asumsi interface Person A:
-  game_engine.py:
-    - GameEngine(player_ids, session_id)
-    - engine.start_round()          → dict  (state awal ronde)
-    - engine.initial_discard()      → Card
-    - engine.take_card(player_id, source)  → Card  (source: "deck"|"discard")
-    - engine.discard_card(player_id, card_dict) → bool
-    - engine.knock(player_id)       → bool
-    - engine.force_showdown()       → dict  (hasil round)
-    - engine.get_state_for_player(player_id) → dict
-    - engine.get_full_state()       → dict
-    - engine.get_reconnect_snapshot(player_id) → dict
-    - engine.current_player        → str (player_id giliran aktif)
-    - engine.active_players        → list[str]
-
-  protocol.py (opsional — fallback ke _encode/_decode lokal jika belum ada):
-    - encode_game_state(state)
-    - encode_action_request(actions)
-    - encode_round_end(result)
-    - encode_game_over(winner)
-    - encode_error(message)
-    - encode_player_joined(players)
-    - encode_game_start()
-"""
-
 import socket
 import threading
 import json
@@ -44,46 +9,30 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Coba import dari game_engine dan protocol Person A.
-# Jika belum ada, gunakan stub sederhana agar server tetap bisa diuji.
-# ---------------------------------------------------------------------------
 try:
     from game_engine import GameEngine
     _HAS_ENGINE = True
 except ImportError:
-    GameEngine = None  # type: ignore
+    GameEngine = None
     _HAS_ENGINE = False
-    logger.warning("game_engine.py belum tersedia — stub mode aktif")
+    logger.warning("game_engine.py belum tersedia, stub mode aktif")
 
-# ---------------------------------------------------------------------------
-# Encode helper (fallback jika protocol.py Person A belum tersedia)
-# ---------------------------------------------------------------------------
 def _encode(msg: dict) -> bytes:
     return (json.dumps(msg) + "\n").encode("utf-8")
 
 
 def _send_to(sock: socket.socket, msg: dict):
-    """Kirim satu packet ke socket. Abaikan error OS (koneksi sudah tutup)."""
     try:
         sock.sendall(_encode(msg))
     except OSError:
         pass
 
-
-# ---------------------------------------------------------------------------
-# Konstanta
-# ---------------------------------------------------------------------------
 MIN_PLAYERS = 2
 MAX_PLAYERS = 4
-TURN_TIMEOUT_SECONDS = 30          # timer per giliran (fitur bonus)
-RECONNECT_GRACE_SECONDS = 60       # waktu maksimal untuk reconnect
-BETWEEN_ROUND_DELAY = 3            # detik jeda otomatis antar ronde
+TURN_TIMEOUT_SECONDS = 30
+RECONNECT_GRACE_SECONDS = 60
+BETWEEN_ROUND_DELAY = 3
 
-
-# ---------------------------------------------------------------------------
-# Util: generate room code & player id
-# ---------------------------------------------------------------------------
 def _new_room_code(existing: set) -> str:
     while True:
         code = "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
@@ -97,10 +46,6 @@ def _new_player_id(existing: set) -> str:
         if pid not in existing:
             return pid
 
-
-# ---------------------------------------------------------------------------
-# PlayerInfo — data satu pemain dalam sebuah room
-# ---------------------------------------------------------------------------
 class PlayerInfo:
     def __init__(self, player_id: str, username: str, sock: socket.socket):
         self.player_id = player_id
@@ -108,55 +53,30 @@ class PlayerInfo:
         self.sock = sock
         self.connected = True
         self.disconnected_at: Optional[float] = None
-        # Ready awal perlu dipisah dari ready antar ronde supaya game tidak
-        # mulai hanya karena satu pemain menekan READY.
-        self.ready = False  # flag untuk ready di lobby (awal game)
-        self.ready_next_round = False  # flag untuk gate antar ronde
+        self.ready = False
+        self.ready_next_round = False
 
-
-# ---------------------------------------------------------------------------
-# GameSession — satu room, satu game
-# ---------------------------------------------------------------------------
 class GameSession:
-    """
-    Mengelola state satu room dari Lobby hingga Game Over.
-
-    State machine:
-      LOBBY → MATCHMAKING → DEAL_CARDS → PLAYER_TURN → KNOCK_TRIGGERED
-      → LAST_TURN_PHASE → REVEAL → SCORE_CALCULATION → LIFE_REDUCTION
-      → PLAYER_ELIMINATION → (NEXT_ROUND | GAME_OVER)
-    """
-
     def __init__(self, room_code: str):
         self.room_code = room_code
         self.state = "LOBBY"
 
-        # {player_id: PlayerInfo}
         self._players: dict[str, PlayerInfo] = {}
-        self._lock = threading.RLock()  # RLock agar method internal bisa saling panggil
+        self._lock = threading.RLock()
 
-        # Game engine (diinisialisasi saat game dimulai)
         self._engine: Optional[GameEngine] = None
 
-        # Turn timer
         self._turn_timer: Optional[threading.Timer] = None
-        self._turn_deadline: Optional[float] = None # FIX: Catat deadline waktu
+        self._turn_deadline: Optional[float] = None
         
-        # Tracking last-turn phase
-        self._last_turn_remaining: set = set()  # player_id yang belum giliran terakhir
-        # [FIX #4 — Person C] siapa yang knock di ronde ini (untuk hasil showdown)
-        self._knocker: Optional[str] = None
-        # Tracking last-turn phase
         self._last_turn_remaining: set = set()
         self._knocker: Optional[str] = None
-        self._last_round_result: Optional[dict] = None # FIX: Simpan hasil skor ronde
+        self._last_turn_remaining: set = set()
+        self._knocker: Optional[str] = None
+        self._last_round_result: Optional[dict] = None
 
-        # Reconnect grace timers: {player_id: Timer}
         self._reconnect_timers: dict[str, threading.Timer] = {}
 
-    # ======================================================================
-    # Akses data pemain
-    # ======================================================================
     def get_connected_player_ids(self) -> list[str]:
         with self._lock:
             return [pid for pid, p in self._players.items() if p.connected]
@@ -173,14 +93,7 @@ class GameSession:
         with self._lock:
             return sum(1 for p in self._players.values() if p.connected)
 
-    # ======================================================================
-    # Lobby: tambah pemain
-    # ======================================================================
     def add_player(self, player_id: str, username: str, sock: socket.socket) -> Optional[str]:
-        """
-        Tambahkan pemain ke lobby.
-        Return error string jika gagal, None jika berhasil.
-        """
         with self._lock:
             if self.state != "LOBBY":
                 return "Room sudah dalam permainan"
@@ -188,15 +101,12 @@ class GameSession:
                 return "Room penuh"
 
             self._players[player_id] = PlayerInfo(player_id, username, sock)
-            
-            # Saat ada pemain baru masuk lobby, semua ready lama dibatalkan
-            # agar start game tetap menunggu seluruh pemain yang aktif.
+
             for p in self._players.values():
                 p.ready = False
             
             logger.info(f"ROOM {self.room_code} | player_joined player_id={player_id} username={username}")
 
-        # Broadcast ke semua: ada pemain baru
         self._broadcast({
             "type": "PLAYER_JOINED",
             "payload": {
@@ -215,15 +125,7 @@ class GameSession:
                 for p in self._players.values()
             ]
 
-    # ======================================================================
-    # Matchmaking: cek apakah bisa mulai
-    # ======================================================================
     def try_start_game(self) -> bool:
-        """
-        Dipanggil setelah pemain mengirim READY, atau otomatis saat
-        jumlah pemain sudah MIN_PLAYERS dan semua connect.
-        Return True jika game berhasil dimulai.
-        """
         with self._lock:
             if self.state != "LOBBY":
                 return False
@@ -236,22 +138,13 @@ class GameSession:
         self._start_round()
         return True
 
-    # ======================================================================
-    # Ronde
-    # ======================================================================
     def _start_round(self):
         with self._lock:
             active_ids = list(self._players.keys())
             if not _HAS_ENGINE:
                 logger.warning("GameEngine tidak tersedia, ronde tidak dimulai")
                 return
-
-            # [FIX #12 — Person C] Jangan buat GameEngine baru tiap ronde:
-            # lives ikut ter-reset sehingga game tidak pernah berakhir.
-            # Engine dibuat sekali; ronde berikutnya cukup start_round() lagi.
-            # (TODO Person A: start_round masih membagikan kartu ke pemain
-            # yang sudah tereliminasi — giliran mereka memang di-skip, tapi
-            # skor mereka ikut dihitung saat showdown.)
+            
             if self._engine is None:
                 self._engine = GameEngine(
                     player_ids=active_ids,
@@ -260,24 +153,20 @@ class GameSession:
             self._engine.start_round()
             self.state = "DEAL_CARDS"
             self._last_turn_remaining = set()
-            self._knocker = None  # [FIX #4 — Person C]
+            self._knocker = None
 
-            # Reset ready flag
             for p in self._players.values():
                 p.ready_next_round = False
 
         logger.info(f"ROOM {self.room_code} | DEAL_CARDS")
 
-        # Kirim kartu tangan masing-masing (private)
         self._send_all_hands()
 
-        # Broadcast game state awal
         self._broadcast_game_state()
 
         with self._lock:
             self.state = "PLAYER_TURN"
 
-        # Kirim giliran pertama
         self._prompt_current_player()
 
     def _send_all_hands(self):
@@ -849,7 +738,7 @@ class GameSession:
 
         self._broadcast({
             "type": "NEXT_ROUND_PROMPT",
-            "payload": {"message": "Kirim READY_NEXT_ROUND untuk melanjutkan ke ronde berikutnya"},
+            "payload": {},
         })
 
     # ------------------------------------------------------------------

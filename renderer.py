@@ -1,17 +1,6 @@
-# =============================================================================
-# renderer.py — Game Kartu 41 client
-# Person C: semua penggambaran Pygame (layar, sprite kartu, tombol, overlay).
-#
-# Renderer membaca ClientState dan TIDAK mengubahnya kecuali
-# state.ui["hitboxes"]: dict nama → pygame.Rect yang dibangun ulang tiap frame
-# supaya input_handler tahu apa yang bisa diklik.
-# =============================================================================
-
 import math
 import os
-
 import pygame
-
 from shared.constants import SUIT_SYMBOLS
 
 WIDTH, HEIGHT = 1280, 720
@@ -19,10 +8,8 @@ WIDTH, HEIGHT = 1280, 720
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 CARD_DIR = os.path.join(ASSET_DIR, "cards")
 FONT_PATH = os.path.join(ASSET_DIR, "fonts", "Kenney Pixel.ttf")
+CARD_W, CARD_H = 64, 64
 
-CARD_W, CARD_H = 64, 64  # ukuran asli pixel art Kenney
-
-# Palet
 FELT_DARK = (16, 64, 38)
 FELT_LIGHT = (26, 94, 56)
 PANEL = (20, 28, 24)
@@ -34,14 +21,7 @@ GOLD = (235, 190, 80)
 RED = (210, 70, 60)
 GREEN = (90, 200, 110)
 BLUE = (90, 150, 220)
-
-# Map rank → nama file ('2'→'02' ... '9'→'09'; 'A','10','J','Q','K' apa adanya)
 _RANK_FILE = {str(n): f"0{n}" for n in range(2, 10)}
-
-
-# =============================================================================
-# Assets (lazy singleton — butuh pygame.init() lebih dulu)
-# =============================================================================
 
 class Assets:
     _instance = None
@@ -53,8 +33,6 @@ class Assets:
         return cls._instance
 
     def __init__(self):
-        # Font: Kenney Pixel kalau ada, kalau tidak font sistem.
-        # Font simbol terpisah untuk ♠♥♦♣ (font pixel sering tidak punya glyph).
         def _font(size):
             if os.path.exists(FONT_PATH):
                 return pygame.font.Font(FONT_PATH, size)
@@ -71,7 +49,6 @@ class Assets:
         self.card_back = self._load("card_back.png")
         self.card_empty = self._load("card_empty.png")
 
-    # ------------------------------------------------------------------
     def _load(self, filename: str) -> pygame.Surface | None:
         path = os.path.join(CARD_DIR, filename)
         try:
@@ -104,8 +81,7 @@ class Assets:
     def _placeholder(self, suit, rank, back=False, empty=False) -> pygame.Surface:
         surf = pygame.Surface((CARD_W, CARD_H), pygame.SRCALPHA)
         if empty:
-            pygame.draw.rect(surf, (255, 255, 255, 60),
-                             surf.get_rect(), 2, border_radius=6)
+            pygame.draw.rect(surf, (255, 255, 255, 60), surf.get_rect(), 2, border_radius=6)
             return surf
         color = (60, 70, 140) if back else (250, 250, 245)
         pygame.draw.rect(surf, color, surf.get_rect(), border_radius=6)
@@ -120,13 +96,9 @@ class Assets:
 
 
 def _scaled(surf: pygame.Surface, factor: int) -> pygame.Surface:
-    # Faktor integer menjaga pixel art tetap tajam — jangan smoothscale.
     return pygame.transform.scale_by(surf, factor) if factor != 1 else surf
 
-
-# =============================================================================
-# Helper umum
-# =============================================================================
+# Helper umum --
 
 _background: pygame.Surface | None = None
 
@@ -160,11 +132,10 @@ def _text(screen, font, text, color, center=None, topleft=None):
 def _button(screen, state, key, rect, label, enabled=True, accent=GOLD):
     a = Assets.get()
     
-    # FIX 1: Dinamis menyesuaikan lebar rect dengan teks
     label_surf = a.font_body.render(label, True, (0, 0, 0))
-    min_w = label_surf.get_width() + 40  # Tambahkan padding 20px di kiri & kanan
+    min_w = label_surf.get_width() + 40
     if rect.width < min_w:
-        rect = rect.inflate(min_w - rect.width, 0) # Lebarkan rect dari titik tengah
+        rect = rect.inflate(min_w - rect.width, 0)
         
     mouse = pygame.mouse.get_pos()
     hover = enabled and rect.collidepoint(mouse)
@@ -243,14 +214,11 @@ def _draw_help_overlay(screen, state):
             pygame.Rect(panel.centerx - 70, panel.bottom - 65, 140, 45), 
             "TUTUP", accent=RED)
 
-# =============================================================================
-# Layar CONNECT
-# =============================================================================
+# Layar CONNECT --
 
 def _draw_connect(screen, state, now):
     a = Assets.get()
-    
-    # FIX: Tambahkan tombol Help & Quit di pojok kanan atas
+
     _button(screen, state, "menu_quit_btn", pygame.Rect(WIDTH - 120, 20, 100, 40), "QUIT", accent=RED)
     _button(screen, state, "menu_help_btn", pygame.Rect(WIDTH - 240, 20, 100, 40), "HELP", accent=BLUE)
     
@@ -267,7 +235,6 @@ def _draw_connect(screen, state, now):
     _button(screen, state, "connect_btn",
             pygame.Rect(WIDTH // 2 - 110, 470, 220, 52), "CONNECT")
 
-    # FIX: Tombol Reconnect Dinamis (Hanya muncul jika last_session tersimpan)
     last = state.ui.get("last_session") or {}
     if last.get("player_id") and last.get("room_code"):
         _button(screen, state, "resume_btn",
@@ -279,14 +246,10 @@ def _draw_connect(screen, state, now):
           f"server: {state.host}   [Tab] pindah kolom  [Enter] connect",
           DIM_GREY, center=(WIDTH // 2, HEIGHT - 30))
 
-    # FIX: Tampilkan Overlay Help jika state show_help aktif
     if state.ui.get("show_help"):
         _draw_help_overlay(screen, state)
 
-
-# =============================================================================
-# Layar LOBBY
-# =============================================================================
+# Layar LOBBY --
 
 def _draw_lobby(screen, state, now):
     a = Assets.get()
@@ -382,8 +345,6 @@ def _draw_countdown(screen, state, now):
     if remaining <= 0:
         return
     frac = max(0.0, min(1.0, remaining / 30.0))
-    # Timer dulu terlalu dekat ke panel lawan, jadi dipindah ke area kosong
-    # di tengah atas agar tidak overlap dengan GUI.
     bar = pygame.Rect(TABLE_CX - 150, 220, 300, 10)
     pygame.draw.rect(screen, PANEL, bar, border_radius=5)
     color = GREEN if frac > 0.5 else (GOLD if frac > 0.2 else RED)
@@ -403,27 +364,41 @@ def _draw_chat(screen, state, now):
     _text(screen, a.font_body, "CHAT", GREY, topleft=(panel.x + 14, 12))
 
     input_rect = pygame.Rect(panel.x + 10, HEIGHT - 46, CHAT_W - 20, 34)
-    y = input_rect.y - 26
-    for entry in reversed(state.chat_log[-14:]):
+    max_chat_w = CHAT_W - 28
+    wrapped_lines = []
+    
+    for entry in state.chat_log[-30:]: 
         line = f"{entry['username']}: {entry['text']}"
-        surf = a.font_small.render(line[:40], True, WHITE)
+        words = line.split(' ')
+        curr_line = ""
+        for word in words:
+            test_line = curr_line + word + " "
+            if a.font_small.size(test_line)[0] < max_chat_w:
+                curr_line = test_line
+            else:
+                if curr_line: 
+                    wrapped_lines.append(curr_line)
+                curr_line = "  " + word + " " 
+        if curr_line: 
+            wrapped_lines.append(curr_line)
+
+    y = input_rect.y - 24
+    for line_text in reversed(wrapped_lines):
+        surf = a.font_small.render(line_text, True, WHITE)
         screen.blit(surf, (panel.x + 14, y))
-        y -= 22
+        y -= 20
         if y < 44:
             break
 
     focused = state.ui.get("focus") == "chat_input"
     pygame.draw.rect(screen, PANEL_LIGHT, input_rect, border_radius=6)
-    pygame.draw.rect(screen, GOLD if focused else GREY, input_rect, 2,
-                     border_radius=6)
+    pygame.draw.rect(screen, GOLD if focused else GREY, input_rect, 2, border_radius=6)
     value = state.ui.get("chat_input", "")
     shown = value or "[Enter] untuk chat"
     if focused and (pygame.time.get_ticks() // 500) % 2:
         shown = value + "|"
-    _text(screen, a.font_small, shown[-34:], WHITE if value else DIM_GREY,
-          topleft=(input_rect.x + 8, input_rect.y + 8))
+    _text(screen, a.font_small, shown[-34:], WHITE if value else DIM_GREY, topleft=(input_rect.x + 8, input_rect.y + 8))
     _hit(state, "chat_input", input_rect)
-
 
 def _draw_table(screen, state, now):
     a = Assets.get()
@@ -527,21 +502,19 @@ def _draw_table(screen, state, now):
         _text(screen, a.font_symbol_big, "♥" * mine["lives"], RED,
               topleft=(16, HEIGHT - 44))
 
+    # FIX 2: Indikator MIC menyala saat kamu menahan tombol 'V'
+    if state.speaking.get(state.player_id, 0) > now:
+        mic_box = pygame.Rect(16, HEIGHT - 76, 90, 24)
+        pygame.draw.rect(screen, PANEL_LIGHT, mic_box, border_radius=4)
+        pygame.draw.rect(screen, GREEN, mic_box, 1, border_radius=4)
+        pygame.draw.circle(screen, GREEN, (mic_box.x + 12, mic_box.centery), 4)
+        _text(screen, a.font_small, "MIC ON", GREEN, topleft=(mic_box.x + 24, mic_box.y + 5))
+
     # In-game controls: quit + menu buttons (top-right corner, above chat panel)
-    _button(screen, state, "ingame_quit_btn",
-            pygame.Rect(WIDTH - CHAT_W - 195, 12, 80, 28),
-            "QUIT", accent=RED)
-    _button(screen, state, "ingame_menu_btn",
-            pygame.Rect(WIDTH - CHAT_W - 95, 12, 80, 28),
-            "MENU", accent=GREY)
-
-    # Small help note at bottom-left
-    _text(screen, a.font_small,
-          "[V] bicara  [Enter] chat  MENU=kembali ke lobby  QUIT=keluar",
-          DIM_GREY, topleft=(16, HEIGHT - 18))
-
-    _draw_chat(screen, state, now)
-
+    if state.phase not in ("ROUND_END", "WAITING_READY", "GAME_OVER", "RECONNECTING"):
+        _button(screen, state, "ingame_quit_btn",
+                pygame.Rect(WIDTH - CHAT_W - 174, 12, 80, 28),
+                "QUIT", accent=RED)
 
 # =============================================================================
 # Overlay ROUND_END / WAITING_READY
