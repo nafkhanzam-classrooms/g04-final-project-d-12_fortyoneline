@@ -869,7 +869,6 @@ def run_gui(args):
             # 3. Input → aksi protokol
             running = input_handler.handle(pygame.event.get(), state, net, voice)
 
-            # FIX: Hentikan dan hancurkan koneksi Voice lama jika kita kembali ke layar Login/Menu
             if state.phase == "CONNECT" and voice is not None:
                 voice.close()
                 voice = None
