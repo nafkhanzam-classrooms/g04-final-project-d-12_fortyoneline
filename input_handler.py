@@ -115,8 +115,8 @@ def _handle_click(pos, state, net):
             break
 
     if key is None:
-        if state.ui.get("focus") == "chat_input":
-            state.ui["focus"] = None
+        # FIX 1: Lepas kursor apa pun (termasuk username & room) jika klik background kosong
+        state.ui["focus"] = None
         return
 
     # FIX: Prioritaskan tombol Help agar tombol di belakangnya tidak bisa diklik
@@ -131,8 +131,10 @@ def _handle_click(pos, state, net):
     if key in TEXT_FIELDS:
         state.ui["focus"] = key
         return
-    if state.ui.get("focus") == "chat_input":
-        state.ui["focus"] = None
+        
+    # FIX 2: Lepas kursor apa pun jika kita mengklik tombol lain
+    # (sebelumnya ini hanya melepaskan kursor chat_input saja)
+    state.ui["focus"] = None
 
     # --- LOGIKA GAMEPLAY & TOMBOL BAWAAN ---
     if key == "connect_btn":

@@ -321,9 +321,10 @@ def _on_login_ack(state, p, now):
     state.room_code = p.get("room_code") or state.room_code
     state.phase = PHASE_LOBBY
     state.toast(p.get("message", "Bergabung ke room"), now)
+    clear_session(state.host, state.username) 
     
-    # FIX: Pastikan tidak ada sisa file sesi lama saat di Lobby
-    clear_session(state.host, state.username)
+    # FIX 3: Lepas fokus saat berhasil masuk Lobby agar tombol V bisa berfungsi
+    state.ui["focus"] = None
 
 
 def _on_error(state, p, now):
@@ -543,6 +544,9 @@ def _on_reconnect_ack(state, p, now):
 
     state.reconnect_deadline = None
     state.toast(p.get("message", "Berhasil reconnect"), now)
+    
+    # FIX 4: Lepas fokus saat berhasil Reconnect
+    state.ui["focus"] = None
 
 
 def _on_pong(state, p, now):

@@ -144,7 +144,7 @@ class GameSession:
             if not _HAS_ENGINE:
                 logger.warning("GameEngine tidak tersedia, ronde tidak dimulai")
                 return
-            
+
             if self._engine is None:
                 self._engine = GameEngine(
                     player_ids=active_ids,
@@ -153,20 +153,24 @@ class GameSession:
             self._engine.start_round()
             self.state = "DEAL_CARDS"
             self._last_turn_remaining = set()
-            self._knocker = None
+            self._knocker = None  # [FIX #4 — Person C]
 
+            # Reset ready flag
             for p in self._players.values():
                 p.ready_next_round = False
 
         logger.info(f"ROOM {self.room_code} | DEAL_CARDS")
 
+        # Kirim kartu tangan masing-masing (private)
         self._send_all_hands()
 
+        # Broadcast game state awal
         self._broadcast_game_state()
 
         with self._lock:
             self.state = "PLAYER_TURN"
 
+        # Kirim giliran pertama
         self._prompt_current_player()
 
     def _send_all_hands(self):

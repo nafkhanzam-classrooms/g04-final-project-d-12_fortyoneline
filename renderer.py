@@ -511,10 +511,19 @@ def _draw_table(screen, state, now):
         _text(screen, a.font_small, "MIC ON", GREEN, topleft=(mic_box.x + 24, mic_box.y + 5))
 
     # In-game controls: quit + menu buttons (top-right corner, above chat panel)
-    if state.phase not in ("ROUND_END", "WAITING_READY", "GAME_OVER", "RECONNECTING"):
-        _button(screen, state, "ingame_quit_btn",
-                pygame.Rect(WIDTH - CHAT_W - 174, 12, 80, 28),
-                "QUIT", accent=RED)
+    _button(screen, state, "ingame_quit_btn",
+            pygame.Rect(WIDTH - CHAT_W - 195, 12, 80, 28),
+            "QUIT", accent=RED)
+    _button(screen, state, "ingame_menu_btn",
+            pygame.Rect(WIDTH - CHAT_W - 95, 12, 80, 28),
+            "MENU", accent=GREY)
+
+    # Small help note at bottom-left
+    _text(screen, a.font_small,
+          "[V] bicara  [Enter] chat  MENU=kembali ke lobby  QUIT=keluar",
+          DIM_GREY, topleft=(16, HEIGHT - 18))
+
+    _draw_chat(screen, state, now)
 
 # =============================================================================
 # Overlay ROUND_END / WAITING_READY
