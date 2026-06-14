@@ -67,13 +67,49 @@ def _send_chat(state, net):
 
 
 # ---------------------------------------------------------------------------
+# Helper reset ke layar CONNECT
+# ---------------------------------------------------------------------------
+
+def _reset_to_connect(state, keep_session=False):
+    """Bersihkan state permainan dan kembalikan ke layar login."""
+    if keep_session and state.player_id and state.room_code:
+        state.ui["last_session"] = {
+            "player_id": state.player_id,
+            "room_code": state.room_code,
+            "username": state.username,
+            "host": state.host
+        }
+    else:
+        state.ui.pop("last_session", None)
+        # FIX: Hapus file dari hardisk agar tidak muncul tombol saat restart game
+        if hasattr(state, "clear_session_file"):
+            state.clear_session_file()
+
+    state.phase = "CONNECT"
+    state.player_id = ""
+    state.room_code = ""
+    state.hand = []
+    state.players = []
+    state.valid_actions = []
+    state.current_turn = ""
+    state.round_result = None
+    state.game_over_info = None
+    state.turn_deadline = None
+    state.ui["ready_sent"] = False
+    state.ui["next_ready_sent"] = False
+    state.ui["focus"] = "username_input"
+
+
+# ---------------------------------------------------------------------------
 # Klik mouse
 # ---------------------------------------------------------------------------
 
 def _handle_click(pos, state, net):
     hitboxes = state.ui.get("hitboxes") or {}
     key = None
-    for k, rect in hitboxes.items():
+    
+    # FIX: Membalik urutan agar elemen teratas (Overlay) dicegat kliknya duluan
+    for k, rect in reversed(list(hitboxes.items())):
         if rect.collidepoint(pos):
             key = k
             break
@@ -81,6 +117,12 @@ def _handle_click(pos, state, net):
     if key is None:
         if state.ui.get("focus") == "chat_input":
             state.ui["focus"] = None
+        return
+
+    # FIX: Prioritaskan tombol Help agar tombol di belakangnya tidak bisa diklik
+    if state.ui.get("show_help"):
+        if key == "close_help_btn":
+            state.ui["show_help"] = False
         return
 
     actions = state.valid_actions or []
@@ -92,6 +134,7 @@ def _handle_click(pos, state, net):
     if state.ui.get("focus") == "chat_input":
         state.ui["focus"] = None
 
+    # --- LOGIKA GAMEPLAY & TOMBOL BAWAAN ---
     if key == "connect_btn":
         _submit_login(state, net)
     elif key == "resume_btn":
@@ -99,6 +142,10 @@ def _handle_click(pos, state, net):
     elif key == "ready_btn":
         if net.send("READY", {}):
             state.ui["ready_sent"] = True
+    elif key == "unready_btn":
+        # Kirim UNREADY ke server dan batalkan flag lokal
+        net.send("UNREADY", {})
+        state.ui["ready_sent"] = False
     elif key in ("deck", "btn_take_deck"):
         if "TAKE_DECK" in actions:
             net.send("TAKE_DECK", {})
@@ -117,9 +164,36 @@ def _handle_click(pos, state, net):
     elif key == "next_round_btn":
         if net.send("READY_NEXT_ROUND", {}):
             state.ui["next_ready_sent"] = True
-    elif key == "exit_btn":
-        return "quit"
+    elif key == "next_unready_btn":
+        # Batalkan siap ronde berikutnya
+        net.send("UNREADY_NEXT_ROUND", {})
+        state.ui["next_ready_sent"] = False
 
+    # --- UPDATE LOGIKA MENU, HELP & QUIT ---
+    elif key == "lobby_menu_btn":
+        # Jika di Lobby, keluar berarti benar-benar meninggalkan permainan
+        net.send("LEAVE", {})
+        net.close()
+        _reset_to_connect(state, keep_session=False)
+    elif key in ("round_end_menu_btn", "ingame_menu_btn"):
+        # Jika In-Game, JANGAN kirim LEAVE. Hanya putuskan soket.
+        # Ini akan menjadikan pemain abu-abu di meja sehingga dia bisa Reconnect.
+        net.close()
+        _reset_to_connect(state, keep_session=True)
+    elif key == "game_over_menu_btn":
+        net.close()
+        _reset_to_connect(state, keep_session=False) # Game usai, jangan simpan sesi
+    elif key in ("ingame_quit_btn", "game_over_quit_btn", "menu_quit_btn", "exit_btn"):
+        if key == "ingame_quit_btn":
+            net.send("LEAVE", {})
+
+        # FIX: Hapus file saat menutup aplikasi
+        if hasattr(state, "clear_session_file"):
+            state.clear_session_file()
+
+        return "quit"
+    elif key == "menu_help_btn":
+        state.ui["show_help"] = True
 
 # ---------------------------------------------------------------------------
 # Keyboard

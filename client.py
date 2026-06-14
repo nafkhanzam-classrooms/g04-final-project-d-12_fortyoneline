@@ -232,7 +232,17 @@ class ClientState:
 
     def is_my_turn(self) -> bool:
         return bool(self.player_id) and self.current_turn == self.player_id
-
+    
+    def clear_session_file(self):
+        import os, re
+        key = re.sub(r"[^A-Za-z0-9._-]+", "_", self.host).strip("_")
+        if not key: key = "default"
+        path = os.path.expanduser(f"~/.kartu41_session_{key}.json")
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
 
 # =============================================================================
 # Persistensi sesi (untuk reconnect setelah client restart)
@@ -263,6 +273,14 @@ def save_session(state: ClientState):
     except OSError:
         pass
 
+def clear_session(host: str, username: str | None = None):
+    """Menghapus file sesi dari disk agar tidak muncul tombol reconnect."""
+    session_file = _session_file_for(host, username)
+    try:
+        if os.path.exists(session_file):
+            os.remove(session_file)
+    except OSError:
+        pass
 
 def load_session(host: str, username: str = "") -> dict | None:
     # Prioritaskan file sesi yang cocok dengan username sekarang; fallback
@@ -303,7 +321,9 @@ def _on_login_ack(state, p, now):
     state.room_code = p.get("room_code") or state.room_code
     state.phase = PHASE_LOBBY
     state.toast(p.get("message", "Bergabung ke room"), now)
-    save_session(state)
+    
+    # FIX: Pastikan tidak ada sisa file sesi lama saat di Lobby
+    clear_session(state.host, state.username)
 
 
 def _on_error(state, p, now):
@@ -318,12 +338,22 @@ def _on_player_joined(state, p, now):
         state.room_code = p["room_code"]
     if p.get("username") and p.get("player_id") != state.player_id:
         state.toast(f"{p['username']} bergabung", now)
+    
+    # FIX NOMOR 4: Reset status tombol ready lokal menjadi tidak ready saat ada pemain masuk
+    # Langkah ini menyinkronkan UI client dengan logika pembatalan ready yang ada di server
+    state.ui["ready_sent"] = False
 
 
 def _on_game_start(state, p, now):
     state.phase = PHASE_PLAYING
     state.round_result = None
+    # Reset ready flags sehingga tombol SIAP muncul kembali di ronde berikutnya
+    state.ui["ready_sent"] = False
+    state.ui["next_ready_sent"] = False
     state.toast(p.get("message", "Permainan dimulai!"), now)
+    
+    # FIX: Simpan riwayat sesi HANYA KETIKA game resmi dimulai
+    save_session(state)
 
 
 def _on_your_hand(state, p, now):
@@ -367,12 +397,18 @@ def _on_turn_indicator(state, p, now):
     if state.phase in (PHASE_ROUND_END, PHASE_WAITING_READY):
         state.phase = PHASE_PLAYING
         state.round_result = None
+        # Ronde baru dimulai → tombol SIAP harus muncul lagi
+        state.ui["next_ready_sent"] = False
 
 
 def _on_valid_actions(state, p, now):
     actions = p.get("actions")
     state.valid_actions = actions if isinstance(actions, list) else []
-    state.turn_deadline = now + TURN_TIMEOUT_SEC
+    
+    # FIX: Hapus/comment baris ini agar animasi countdown tidak ter-reset
+    # ke 30 detik setiap kali pemain selesai mengambil kartu!
+    # state.turn_deadline = now + TURN_TIMEOUT_SEC  <--- HAPUS BARIS INI
+    
     if state.valid_actions == ["DISCARD"]:
         state.phase = PHASE_MUST_DISCARD
     elif state.phase == PHASE_MUST_DISCARD:
@@ -408,6 +444,9 @@ def _on_game_over(state, p, now):
     state.phase = PHASE_GAME_OVER
     state.valid_actions = []
     state.turn_deadline = None
+    
+    # FIX: Hapus riwayat karena permainan sudah usai sepenuhnya
+    clear_session(state.host, state.username)
 
 
 def _set_player_connected(state, player_id, connected):
@@ -455,6 +494,8 @@ def _on_reconnect_ack(state, p, now):
     lives = snap.get("lives") or {}
     order = snap.get("player_order") or []
     players = snap.get("players")
+    opponents = snap.get("opponents") or {}
+
     if isinstance(players, list) and players:
         state.players = players
     elif not state.players and isinstance(order, list):
@@ -463,22 +504,43 @@ def _on_reconnect_ack(state, p, now):
              "hand_count": None, "connected": True}
             for pid in order
         ]
-    else:
-        for pl in state.players:
-            pid = pl.get("player_id")
-            if pid in lives:
-                pl["lives"] = lives[pid]
 
-    # Snapshot kosong = game belum mulai (engine None di server) → ke lobby
+    # FIX 1A: Selalu sinkronkan nyawa dan kartu lawan, karena array "players" 
+    # bawaan dari lobby server tidak membawa info nyawa In-Game.
+    for pl in state.players:
+        pid = pl.get("player_id")
+        if pid in lives:
+            pl["lives"] = lives[pid]
+        if pid in opponents:
+            pl["hand_count"] = opponents[pid].get("card_count")
+
     actions = snap.get("valid_actions")
     if isinstance(actions, list):
         state.valid_actions = actions
-    # Jika server memberi aksi valid saat reconnect, jadikan phase yang
-    # sesuai supaya prompt/discard state tidak tersisa dari turn lama.
-    if state.valid_actions == ["DISCARD"]:
+    
+    # Setel ulang Phase
+    actions = snap.get("valid_actions")
+    if isinstance(actions, list):
+        state.valid_actions = actions
+    
+    # FIX: Setel ulang Phase dengan memprioritaskan status dari server
+    session_state = snap.get("session_state")
+    
+    if session_state == "WAITING_READY":
+        state.phase = PHASE_WAITING_READY
+        state.round_result = snap.get("round_result")
+    elif state.valid_actions == ["DISCARD"]:
         state.phase = PHASE_MUST_DISCARD
     else:
         state.phase = PHASE_PLAYING if snap else PHASE_LOBBY
+
+    # FIX: Baca sisa waktu (turn_remaining) kiriman server
+    rem = snap.get("turn_remaining")
+    if rem is not None:
+        state.turn_deadline = now + rem
+    else:
+        state.turn_deadline = None
+
     state.reconnect_deadline = None
     state.toast(p.get("message", "Berhasil reconnect"), now)
 

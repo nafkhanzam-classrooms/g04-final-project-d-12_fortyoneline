@@ -159,14 +159,22 @@ def _text(screen, font, text, color, center=None, topleft=None):
 
 def _button(screen, state, key, rect, label, enabled=True, accent=GOLD):
     a = Assets.get()
+    
+    # FIX 1: Dinamis menyesuaikan lebar rect dengan teks
+    label_surf = a.font_body.render(label, True, (0, 0, 0))
+    min_w = label_surf.get_width() + 40  # Tambahkan padding 20px di kiri & kanan
+    if rect.width < min_w:
+        rect = rect.inflate(min_w - rect.width, 0) # Lebarkan rect dari titik tengah
+        
     mouse = pygame.mouse.get_pos()
     hover = enabled and rect.collidepoint(mouse)
     bg = accent if hover else (PANEL_LIGHT if enabled else PANEL)
     fg = (20, 20, 20) if hover else (WHITE if enabled else DIM_GREY)
+    
     pygame.draw.rect(screen, bg, rect, border_radius=8)
-    pygame.draw.rect(screen, accent if enabled else DIM_GREY, rect, 2,
-                     border_radius=8)
+    pygame.draw.rect(screen, accent if enabled else DIM_GREY, rect, 2, border_radius=8)
     _text(screen, a.font_body, label, fg, center=rect.center)
+    
     if enabled:
         _hit(state, key, rect)
 
@@ -201,12 +209,51 @@ def _draw_toasts(screen, state, now):
         y -= box.h + 6
 
 
+def _draw_help_overlay(screen, state):
+    a = Assets.get()
+    shade = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    shade.fill((0, 0, 0, 220))
+    screen.blit(shade, (0, 0))
+    
+    panel = pygame.Rect(WIDTH // 2 - 460, HEIGHT // 2 - 250, 920, 500)
+    pygame.draw.rect(screen, PANEL, panel, border_radius=14)
+    pygame.draw.rect(screen, GOLD, panel, 2, border_radius=14)
+    
+    _text(screen, a.font_h1, "CARA BERMAIN KARTU 41", GOLD, center=(panel.centerx, panel.y + 40))
+    
+    rules = [
+        "1. Tujuan game ini adalah mengumpulkan 4 kartu dengan Kembang/Suit",
+        "   yang sama dengan total nilai tertinggi (Maksimal 41).",
+        "2. Nilai kartu: As(11), K/Q/J/10 (10 poin), sisanya sesuai angka.",
+        "3. Saat giliranmu, kamu harus MENGAMBIL 1 kartu (dari Deck atau Buangan).",
+        "4. Setelah itu, kamu wajib MEMBUANG 1 kartu ke tumpukan buangan.",
+        "5. Jika kamu merasa nilaimu sudah cukup tinggi, kamu bisa melakukan KNOCK",
+        "   di awal giliranmu (sebelum mengambil kartu).",
+        "6. Saat seseorang KNOCK, pemain lain masing-masing mendapat 1x giliran terakhir.",
+        "7. Pemain dengan skor terendah di akhir ronde akan kehilangan 1 nyawa.",
+        "8. Pemain yang kehabisan nyawa akan tereliminasi dari permainan."
+    ]
+    
+    y = panel.y + 100
+    for line in rules:
+        _text(screen, a.font_small, line, WHITE, topleft=(panel.x + 40, y))
+        y += 30
+        
+    _button(screen, state, "close_help_btn", 
+            pygame.Rect(panel.centerx - 70, panel.bottom - 65, 140, 45), 
+            "TUTUP", accent=RED)
+
 # =============================================================================
 # Layar CONNECT
 # =============================================================================
 
 def _draw_connect(screen, state, now):
     a = Assets.get()
+    
+    # FIX: Tambahkan tombol Help & Quit di pojok kanan atas
+    _button(screen, state, "menu_quit_btn", pygame.Rect(WIDTH - 120, 20, 100, 40), "QUIT", accent=RED)
+    _button(screen, state, "menu_help_btn", pygame.Rect(WIDTH - 240, 20, 100, 40), "HELP", accent=BLUE)
+    
     _text(screen, a.font_big, "KARTU 41", GOLD, center=(WIDTH // 2, 150))
     _text(screen, a.font_small, "Game jaringan — Progjar D-12", GREY,
           center=(WIDTH // 2, 200))
@@ -220,15 +267,21 @@ def _draw_connect(screen, state, now):
     _button(screen, state, "connect_btn",
             pygame.Rect(WIDTH // 2 - 110, 470, 220, 52), "CONNECT")
 
+    # FIX: Tombol Reconnect Dinamis (Hanya muncul jika last_session tersimpan)
     last = state.ui.get("last_session") or {}
     if last.get("player_id") and last.get("room_code"):
         _button(screen, state, "resume_btn",
-                pygame.Rect(WIDTH // 2 - 170, 545, 340, 40),
-                f"RECONNECT ke {last['room_code']} ({last.get('username', '')})",
+                pygame.Rect(WIDTH // 2 - 160, 545, 320, 40),
+                f"RECONNECT ke {last['room_code']}",
                 accent=BLUE)
+                
     _text(screen, a.font_small,
           f"server: {state.host}   [Tab] pindah kolom  [Enter] connect",
           DIM_GREY, center=(WIDTH // 2, HEIGHT - 30))
+
+    # FIX: Tampilkan Overlay Help jika state show_help aktif
+    if state.ui.get("show_help"):
+        _draw_help_overlay(screen, state)
 
 
 # =============================================================================
@@ -254,12 +307,26 @@ def _draw_lobby(screen, state, now):
         y += 36
 
     ready_sent = state.ui.get("ready_sent")
-    _button(screen, state, "ready_btn",
-            pygame.Rect(WIDTH // 2 - 110, 560, 220, 52),
-            "MENUNGGU..." if ready_sent else "READY",
-            enabled=not ready_sent)
-    _text(screen, a.font_small, "Game mulai saat semua pemain (min 2) READY",
-          DIM_GREY, center=(WIDTH // 2, 640))
+
+    # Tampilkan tombol READY hanya jika ada 2 pemain atau lebih
+    if len(players) >= 2:
+        if ready_sent:
+            # Teks dipindah ke ATAS tombol agar tidak tumpang tindih
+            _text(screen, a.font_body, "Menunggu pemain lain...", GREY, center=(WIDTH // 2, 530))
+            _button(screen, state, "unready_btn",
+                    pygame.Rect(WIDTH // 2 - 100, 560, 200, 52),
+                    "BATAL READY", accent=RED)
+        else:
+            _button(screen, state, "ready_btn",
+                    pygame.Rect(WIDTH // 2 - 110, 560, 220, 52), "READY")
+    else:
+        _text(screen, a.font_body, "Menunggu minimal 2 pemain", DIM_GREY, center=(WIDTH // 2, 586))
+
+    _button(screen, state, "lobby_menu_btn",
+            pygame.Rect(WIDTH // 2 - 80, 630, 160, 38),
+            "KELUAR KE MENU", accent=GREY)
+    _text(screen, a.font_small, "Game dimulai setelah minimal 2 pemain READY",
+          DIM_GREY, center=(WIDTH // 2, HEIGHT - 16))
 
 
 # =============================================================================
@@ -377,7 +444,10 @@ def _draw_table(screen, state, now):
 
     # Panel lawan (atas / sisi)
     others = [p for p in state.players if p.get("player_id") != state.player_id]
-    panel_w, panel_h = 230, 92
+    
+    # FIX 2: Lebarkan panel dari 230 menjadi 270 agar kartu kelima tidak meluber ke luar garis
+    panel_w, panel_h = 270, 92 
+    
     spots = [
         pygame.Rect(TABLE_CX - panel_w // 2, 120, panel_w, panel_h),
         pygame.Rect(40, 240, panel_w, panel_h),
@@ -431,9 +501,13 @@ def _draw_table(screen, state, now):
         x0 = TABLE_CX - total // 2
         mouse = pygame.mouse.get_pos()
         base_y = HEIGHT - cw - 20
+        
+        # FIX 2: Jangan aktifkan interaksi (hover/hitbox) jika tertutup overlay
+        is_active = state.phase not in ("ROUND_END", "WAITING_READY", "GAME_OVER")
+
         for i, card in enumerate(hand):
             rect = pygame.Rect(x0 + i * spacing, base_y, cw, cw)
-            hovered = rect.collidepoint(mouse)
+            hovered = is_active and rect.collidepoint(mouse)
             if hovered:
                 rect = rect.move(0, -16)  # hover lift
             img = _scaled(a.card(card), scale)
@@ -441,14 +515,30 @@ def _draw_table(screen, state, now):
                 pygame.draw.rect(screen, GOLD, rect.inflate(8, 8), 3,
                                  border_radius=8)
             screen.blit(img, rect)
-            _hit(state, ("hand", i), rect)
+            
+            # Hanya tambahkan ke hitbox jika area meja sedang aktif
+            if is_active:
+                _hit(state, ("hand", i), rect)
 
     # Info nyawa sendiri
     mine = next((p for p in state.players
                  if p.get("player_id") == state.player_id), None)
     if mine is not None and isinstance(mine.get("lives"), int):
         _text(screen, a.font_symbol_big, "♥" * mine["lives"], RED,
-              topleft=(16, HEIGHT - 40))
+              topleft=(16, HEIGHT - 44))
+
+    # In-game controls: quit + menu buttons (top-right corner, above chat panel)
+    _button(screen, state, "ingame_quit_btn",
+            pygame.Rect(WIDTH - CHAT_W - 195, 12, 80, 28),
+            "QUIT", accent=RED)
+    _button(screen, state, "ingame_menu_btn",
+            pygame.Rect(WIDTH - CHAT_W - 95, 12, 80, 28),
+            "MENU", accent=GREY)
+
+    # Small help note at bottom-left
+    _text(screen, a.font_small,
+          "[V] bicara  [Enter] chat  MENU=kembali ke lobby  QUIT=keluar",
+          DIM_GREY, topleft=(16, HEIGHT - 18))
 
     _draw_chat(screen, state, now)
 
@@ -515,17 +605,25 @@ def _draw_round_end(screen, state, now):
         y += CARD_H + 26
 
     if state.phase == "WAITING_READY":
+        # Posisi Kiri: Keluar ke Menu
+        _button(screen, state, "round_end_menu_btn",
+                pygame.Rect(panel.x + 50, panel.bottom - 60, 160, 40),
+                "KELUAR KE MENU", accent=GREY)
+        
+        # Posisi Kanan: Aksi Siap / Batal Siap
         if state.ui.get("next_ready_sent"):
             _text(screen, a.font_body, "Menunggu pemain lain...", GREY,
-                  center=(panel.centerx, panel.bottom - 45))
+                  center=(panel.right - 160, panel.bottom - 80))
+            _button(screen, state, "next_unready_btn",
+                    pygame.Rect(panel.right - 250, panel.bottom - 60, 160, 40),
+                    "BATAL SIAP", accent=RED)
         else:
             _button(screen, state, "next_round_btn",
-                    pygame.Rect(panel.centerx - 150, panel.bottom - 70, 300, 48),
+                    pygame.Rect(panel.right - 300, panel.bottom - 60, 240, 40),
                     "SIAP RONDE BERIKUTNYA")
     else:
         _text(screen, a.font_small, "Menunggu server...", GREY,
               center=(panel.centerx, panel.bottom - 40))
-
 
 # =============================================================================
 # Layar GAME_OVER
@@ -554,8 +652,10 @@ def _draw_game_over(screen, state, now):
               center=(WIDTH // 2, y))
         y += 34
 
-    _button(screen, state, "exit_btn",
-            pygame.Rect(WIDTH // 2 - 100, HEIGHT - 110, 200, 48), "KELUAR")
+    _button(screen, state, "game_over_menu_btn",
+            pygame.Rect(WIDTH // 2 - 200, HEIGHT - 110, 170, 48), "KEMBALI KE MENU", accent=GREY)
+    _button(screen, state, "game_over_quit_btn",
+            pygame.Rect(WIDTH // 2 + 30, HEIGHT - 110, 170, 48), "QUIT GAME", accent=RED)
 
 
 # =============================================================================

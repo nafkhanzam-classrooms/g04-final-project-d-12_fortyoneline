@@ -237,9 +237,10 @@ class ClientHandler(threading.Thread):
         if "type" not in msg:
             return False
         allowed_types = {
-            "LOGIN", "RECONNECT", "READY",
+            "LOGIN", "RECONNECT", "READY", "UNREADY",
             "TAKE_DECK", "TAKE_DISCARD", "DISCARD", "KNOCK",
-            "CHAT", "EMOJI_REACT", "PING", "READY_NEXT_ROUND",
+            "CHAT", "EMOJI_REACT", "PING",
+            "READY_NEXT_ROUND", "UNREADY_NEXT_ROUND", "LEAVE",
         }
         return msg["type"] in allowed_types
 
